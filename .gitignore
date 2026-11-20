@@ -1,0 +1,30 @@
+# Secrets
+/credentials.json
+/token.json
+/.env
+*.env
+
+# Runtime state and logs
+/run.log
+/bot-activity.log
+*.log
+/__pycache__/
+*.py[cod]
+
+# Dependencies and generated media
+/node_modules/
+/youtube-dump/
+/converted/
+/temp_upload/
+/uploads/
+/_uploads/
+
+# Local editor state
+/.ropeproject/
+/.vscode/
+/.idea/
+*.swp
+
+# Backups
+*.bak
+*.bak.*
