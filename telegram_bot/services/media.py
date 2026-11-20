@@ -1,22 +1,25 @@
+import logging
 import os
 import requests
 import yt_dlp
-import logging
+from urllib.parse import urlparse
 
-def yt_progress_hook(d):
-    if d['status'] == 'downloading' and context and status_msg:
-        downloaded = d.get('downloaded_bytes', 0)
-        total = d.get('total_bytes') or d.get('total_bytes_estimate', 1)
-        bar = generate_progress_bar(downloaded, total)
-        print(f"Progress: {downloaded}/{total}")
 
-        try:
-            asyncio.run_coroutine_threadsafe(
-                status_msg.edit_text(f"📥 Mengunduh...\n{bar}"),
-                context.application.loop
-            )
-        except Exception as e:
-            logging.warning(f"[yt_dlp] Gagal update progress: {e}")
+def normalize_media_url(url: str, platform: str):
+    """Return URL when its host matches supported platform, else None."""
+    candidate = (url or "").strip().strip("<>.,)")
+    try:
+        host = (urlparse(candidate).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    domains = {
+        "youtube": ("youtube.com", "youtu.be"),
+        "instagram": ("instagram.com",),
+    }
+    allowed = domains.get(platform, ())
+    if not any(host == domain or host.endswith("." + domain) for domain in allowed):
+        return None
+    return candidate
 
 def generate_progress_bar(downloaded: int, total: int, length: int = 20):
     if total == 0:
@@ -53,13 +56,20 @@ async def download_file_with_progress(context, url, filename, chat_id):
 
 def download_youtube(url: str, mode: str = "video", resolution: str = None, music: bool = False):
     try:
+        normalized_url = normalize_media_url(url, "youtube")
+        if not normalized_url:
+            return None
+        url = normalized_url
         out_dir = "youtube-dump"
         os.makedirs(out_dir, exist_ok=True)
+        safe_template = f"{out_dir}/%(id)s_%(title).80s.%(ext)s"
         if mode == "audio":
             ydl_opts = {
                 "format": "bestaudio/best",
-                "outtmpl": f"{out_dir}/%(uploader)s - %(title).50s.%(ext)s" if music else f"{out_dir}/%(title).50s.%(ext)s",
+                "outtmpl": safe_template,
+                "restrictfilenames": True,
                 "quiet": True,
+                "noplaylist": True,
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -70,7 +80,8 @@ def download_youtube(url: str, mode: str = "video", resolution: str = None, musi
             res_filter = f"[height={resolution}]" if resolution else ""
             ydl_opts = {
                 "format": f"bestvideo{res_filter}+bestaudio/best",
-                "outtmpl": f"{out_dir}/%(title).50s_{resolution or 'best'}.%(ext)s",
+                "outtmpl": safe_template,
+                "restrictfilenames": True,
                 "merge_output_format": "mp4",
                 "quiet": True,
                 "noplaylist": True,
@@ -82,10 +93,11 @@ def download_youtube(url: str, mode: str = "video", resolution: str = None, musi
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filepath = ydl.prepare_filename(info)
-            ext = ".mp3" if mode == "audio" else ".mp4"
-            if not filepath.endswith(ext):
-                filepath = os.path.splitext(filepath)[0] + ext
+            filepath = info.get("filepath") or ydl.prepare_filename(info)
+            if mode == "audio":
+                filepath = os.path.splitext(filepath)[0] + ".mp3"
+            elif not filepath.endswith(".mp4"):
+                filepath = os.path.splitext(filepath)[0] + ".mp4"
             title = f"{info.get('uploader', '')} - {info.get('title', '')}" if music else info.get("title", "YouTube")
             return filepath, title
     except Exception as e:

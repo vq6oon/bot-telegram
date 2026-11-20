@@ -9,5 +9,5 @@ class MenuContentTests(unittest.TestCase):
 
     def test_command_menu_does_not_advertise_unregistered_commands(self):
         self.assertNotIn("/rename", COMMANDS_CAPTION)
-        for command in ("/start", "/github", "/rules", "/upload", "/lapor", "/id", "/list", "/checkdrive", "/shorten", "/convert"):
+        for command in ("/start", "/github", "/rules", "/upload", "/lapor", "/id", "/list", "/checkdrive", "/shorten", "/convert", "/yt", "/ig"):
             with self.subTest(command=command): self.assertIn(command, COMMANDS_CAPTION)

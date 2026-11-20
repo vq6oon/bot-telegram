@@ -10,8 +10,9 @@ import mimetypes
 import time
 import subprocess
 import uuid
+from urllib.parse import urlparse
 from ..services.drive import get_drive_usage, upload_to_drive
-from ..services.media import download_file_with_progress, download_youtube
+from ..services.media import download_file_with_progress, download_youtube, normalize_media_url
 from ..services.subtitles import download_subtitle, flag_for_lang
 from ..services.tiktok import download_tiktok_file, is_tiktok_owner
 from ..config import MAX_TELEGRAM_FILE_SIZE
@@ -73,11 +74,13 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if os.path.exists(path):
                 os.remove(path)
 
-async def offer_youtube_format(update: Update, url: str):
-    # ⏳ Info video dari yt-dlp untuk ambil list subtitle
+async def offer_youtube_format(update: Update, url: str, context: ContextTypes.DEFAULT_TYPE):
+    # Keep callback payloads short; Telegram caps callback_data at 64 bytes.
+    token = uuid.uuid4().hex[:12]
+    context.bot_data[f"yt_{token}"] = url
     try:
-        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
+        with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True}) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
         subtitle_langs = list(info.get("subtitles", {}).keys())
     except Exception as e:
         logging.error(f"Gagal deteksi subtitle: {e}")
@@ -87,21 +90,15 @@ async def offer_youtube_format(update: Update, url: str):
     available_langs = [lang for lang in preferred_langs if lang in subtitle_langs]
 
     keyboard = [[
-        InlineKeyboardButton("🎞️ 360p", callback_data=f"yt|video|360|{url}"),
-        InlineKeyboardButton("🎞️ 720p", callback_data=f"yt|video|720|{url}"),
-        InlineKeyboardButton("🎞️ 1080p", callback_data=f"yt|video|1080|{url}"),
+        InlineKeyboardButton("🎞️ 360p", callback_data=f"yt|video|360|{token}"),
+        InlineKeyboardButton("🎞️ 720p", callback_data=f"yt|video|720|{token}"),
+        InlineKeyboardButton("🎞️ 1080p", callback_data=f"yt|video|1080|{token}"),
     ]]
-
-    # Satu baris untuk MP3 + Subtitle (jika ada) + Cancel
-    row = [InlineKeyboardButton("🎵 MP3", callback_data=f"yt|audio||{url}")]
-
+    row = [InlineKeyboardButton("🎵 MP3", callback_data=f"yt|audio||{token}")]
     if available_langs:
-        row.append(InlineKeyboardButton("💬 Subtitle", callback_data=f"yt|submenu||{url}"))
-
+        row.append(InlineKeyboardButton("💬 Subtitle", callback_data=f"yt|submenu||{token}"))
     row.append(InlineKeyboardButton("❌ Cancel", callback_data="yt|cancel||"))
-
     keyboard.append(row)
-
 
     await update.message.reply_text(
         "Pilih format video/audio/subtitle yang ingin diunduh:",
@@ -171,10 +168,14 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("❌ Data callback tidak valid.")
         return
 
-    _, mode, resolution, url = parts
-
+    _, mode, resolution, token = parts
     if mode == "cancel":
         await query.edit_message_text("❌ Operasi dibatalkan.")
+        return
+
+    url = context.bot_data.get(f"yt_{token}")
+    if not url:
+        await query.edit_message_text("❌ Link sudah kedaluwarsa. Kirim ulang link YouTube.")
         return
 
     if mode == "sub":
@@ -215,7 +216,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         subtitle_buttons = [
-            InlineKeyboardButton(f"{flag_for_lang(lang)} {lang.upper()}", callback_data=f"yt|sub|{lang}|{url}")
+            InlineKeyboardButton(f"{flag_for_lang(lang)} {lang.upper()}", callback_data=f"yt|sub|{lang}|{token}")
             for lang in available_langs
         ]
 
@@ -235,7 +236,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     start_time = time.time()
-    result = download_youtube(url, mode, resolution if resolution else None)
+    result = await asyncio.to_thread(download_youtube, url, mode, resolution if resolution else None)
     end_time = time.time()
     duration = round(end_time - start_time)
     m, s = divmod(duration, 60)
@@ -298,8 +299,76 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if os.path.exists(filepath):
             os.remove(filepath)
 
+async def download_youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text("Pakai: /yt <link YouTube>")
+    url = " ".join(context.args).strip()
+    if not media_service_url(url, "youtube"):
+        return await update.message.reply_text("❌ Link YouTube tidak valid. Contoh: /yt https://youtu.be/...")
+    await offer_youtube_format(update, url, context)
+
+
+async def download_instagram_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text("Pakai: /ig <link Instagram>")
+    url = " ".join(context.args).strip()
+    if not media_service_url(url, "instagram"):
+        return await update.message.reply_text("❌ Link Instagram tidak valid. Contoh: /ig https://www.instagram.com/reel/...")
+    await _download_instagram(update, url)
+
+
+async def _download_instagram(update: Update, url: str):
+    msg = await update.message.reply_text("🔍 Mengunduh media Instagram...")
+    filepath = None
+    try:
+        os.makedirs("ig-dump", exist_ok=True)
+        options = {
+            "quiet": True,
+            "noplaylist": True,
+            "restrictfilenames": True,
+            "outtmpl": f"ig-dump/{uuid.uuid4().hex}_%(id)s_%(title).80s.%(ext)s",
+            "merge_output_format": "mp4",
+        }
+
+        def download():
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=True)
+                candidate = info.get("filepath") or ydl.prepare_filename(info)
+                if not os.path.exists(candidate) and not candidate.endswith(".mp4"):
+                    mp4_candidate = os.path.splitext(candidate)[0] + ".mp4"
+                    if os.path.exists(mp4_candidate):
+                        candidate = mp4_candidate
+                return candidate, info.get("title", "Instagram")
+
+        filepath, title = await asyncio.to_thread(download)
+        if not os.path.isfile(filepath):
+            raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
+        if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
+            await msg.edit_text("⏳ File besar, mengunggah ke Google Drive...")
+            link = await asyncio.to_thread(upload_to_drive, filepath)
+            space = await asyncio.to_thread(get_drive_usage)
+            await update.message.reply_text(f"✅ Instagram media tersimpan di Google Drive:\n{link}\n\n💾 {space}")
+        else:
+            with open(filepath, "rb") as media_file:
+                await msg.delete()
+                await update.message.reply_video(
+                    video=InputFile(media_file, filename=os.path.basename(filepath)),
+                    caption=title,
+                )
+    except Exception as error:
+        logging.error("Instagram download error: %s", error)
+        await msg.edit_text(f"❌ Gagal unduh IG: {error}")
+    finally:
+        if filepath and os.path.exists(filepath):
+            os.remove(filepath)
+
+
+def media_service_url(url: str, platform: str):
+    return normalize_media_url(url, platform)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
     user = update.effective_user
 
     # Each update is handled independently; no global/user cooldown.
@@ -308,62 +377,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("http"):
         logging.info(f"[Link] Dari @{user.username or '-'} ({user.first_name} / {user.id}): {text}")
 
-    # 🎥 Link YouTube Deteksi
-    if "youtube.com" in text or "youtu.be" in text:
-        logging.info(f"[YouTube] Memproses: {text}")
+    # YouTube and YouTube Music links
+    youtube_url = media_service_url(text, "youtube")
+    if youtube_url:
+        logging.info(f"[YouTube] Memproses: {youtube_url}")
 
-        if "music.youtube.com" in text:
+        if (urlparse(youtube_url).hostname or "").lower().endswith("music.youtube.com"):
             msg = await update.message.reply_text("🎵 Mengunduh lagu dari YouTube Music...")
-
-            result = download_youtube(
-                text,
-                mode="audio",
-                music=True,
-                context=context,
-                status_msg=msg
-            )
+            result = await asyncio.to_thread(download_youtube, youtube_url, mode="audio", music=True)
             if result:
                 filepath, title = result
                 try:
+                    if not os.path.isfile(filepath):
+                        raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
                     size = os.path.getsize(filepath)
                     if size > MAX_TELEGRAM_FILE_SIZE:
-                        try:
-                            await msg.edit_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...")
-                        except telegram.error.BadRequest:
-                            logging.warning("Gagal edit pesan status, mengirim pesan baru.")
-                            msg = await update.message.reply_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...")
-
-                        link = upload_to_drive(filepath)
-                        space = get_drive_usage()
-                        await update.message.reply_text(
-                            f"⚠️ File terlalu besar.\n📁 Diupload ke Google Drive:\n{link}\n\n💾 {space}"
-                        )
+                        await msg.edit_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...")
+                        link = await asyncio.to_thread(upload_to_drive, filepath)
+                        space = await asyncio.to_thread(get_drive_usage)
+                        await update.message.reply_text(f"⚠️ File terlalu besar.\n📁 Diupload ke Google Drive:\n{link}\n\n💾 {space}")
                     else:
                         with open(filepath, "rb") as f:
-                            try:
-                                await msg.delete()
-                            except telegram.error.BadRequest:
-                                logging.warning("Pesan status sudah tidak ada.")
-                            await update.message.reply_audio(
-                                audio=InputFile(f, filename=os.path.basename(filepath)),
-                                title=title
-                            )
-                except Exception as e:
-                    try:
-                        await msg.edit_text(f"❌ Gagal kirim file: {e}")
-                    except telegram.error.BadRequest:
-                        await update.message.reply_text(f"❌ Gagal kirim file: {e}")
+                            await msg.delete()
+                            await update.message.reply_audio(audio=InputFile(f, filename=os.path.basename(filepath)), title=title)
+                except Exception as error:
+                    await msg.edit_text(f"❌ Gagal kirim file: {error}")
                 finally:
                     if os.path.exists(filepath):
                         os.remove(filepath)
             else:
-                try:
-                    await msg.edit_text("❌ Gagal unduh lagu dari YouTube Music.")
-                except telegram.error.BadRequest:
-                    await update.message.reply_text("❌ Gagal unduh lagu dari YouTube Music.")
+                await msg.edit_text("❌ Gagal unduh lagu dari YouTube Music.")
         else:
-            # youtube.com atau youtu.be biasa
-            await offer_youtube_format(update, text)
+            await offer_youtube_format(update, youtube_url, context)
         return
 
     elif "tiktok.com" in text:
@@ -432,34 +477,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"TikTok error: {e}")
             await msg.edit_text(f"❌ Gagal unduh TikTok: {e}")
 
-    elif "instagram.com" in text:
-        logging.info(f"[Instagram] Memproses: {text}")
-        msg = await update.message.reply_text("🔍 Mendeteksi link Instagram...")
-        try:
-            os.makedirs("ig-dump", exist_ok=True)
-            ydl_opts = {
-                "quiet": True,
-                "outtmpl": "ig-dump/%(title).50s.%(ext)s",
-                "merge_output_format": "mp4",
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(text, download=True)
-                filepath = ydl.prepare_filename(info)
-                if os.path.exists(filepath):
-                    size = os.path.getsize(filepath)
-                    if size > MAX_TELEGRAM_FILE_SIZE:
-                        await msg.edit_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...")
-                        link = upload_to_drive(filepath)
-                        space = get_drive_usage()
-                        await update.message.reply_text(f"⚠️ File terlalu besar.\n📁 Diupload ke Google Drive:\n{link}\n\n💾 Sisa kapasitas: {space}")
-                    else:
-                        with open(filepath, "rb") as f:
-                            await msg.delete()
-                            await update.message.reply_video(InputFile(f, filename=os.path.basename(filepath)), caption=info.get("title", "Instagram"))
-                    os.remove(filepath)
-        except Exception as e:
-            logging.error(f"Instagram error: {e}")
-            await msg.edit_text(f"❌ Gagal unduh IG: {e}")
+    instagram_url = media_service_url(text, "instagram")
+    if instagram_url:
+        logging.info(f"[Instagram] Memproses: {instagram_url}")
+        await _download_instagram(update, instagram_url)
+        return
 
-    else:
-        await update.message.reply_text("❌ Link tidak dikenali. Kirim link dari YouTube, TikTok, Instagram.")
+    await update.message.reply_text("❌ Link tidak dikenali. Kirim link dari YouTube, TikTok, Instagram.")
