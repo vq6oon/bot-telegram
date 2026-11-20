@@ -21,6 +21,7 @@ def build_application():
     app.add_handler(CallbackQueryHandler(media.tiktok_callback_handler, pattern='^tt\\|'))
     app.add_handler(CommandHandler('convert', media.convert))
     app.add_handler(CommandHandler('yt', media.download_youtube_command))
+    app.add_handler(CommandHandler('ytm', media.download_youtube_music_command))
     app.add_handler(CommandHandler('ig', media.download_instagram_command))
     app.add_handler(CallbackQueryHandler(media.yt_callback_handler, pattern='^yt\\|'))
     app.add_handler(CommandHandler('id', general.get_id))

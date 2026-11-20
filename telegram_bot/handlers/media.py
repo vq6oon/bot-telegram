@@ -308,6 +308,44 @@ async def download_youtube_command(update: Update, context: ContextTypes.DEFAULT
     await offer_youtube_format(update, url, context)
 
 
+async def download_youtube_music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = " ".join(context.args).strip() if context.args else ""
+    normalized_url = media_service_url(url, "youtube")
+    if not normalized_url:
+        return await update.message.reply_text("Pakai: /ytm <link YouTube Music>")
+    if not (urlparse(normalized_url).hostname or "").lower().endswith("music.youtube.com"):
+        return await update.message.reply_text("❌ Link harus dari music.youtube.com. Contoh: /ytm https://music.youtube.com/watch?v=...")
+
+    msg = await update.message.reply_text("🎵 Mengunduh lagu dari YouTube Music...")
+    result = await asyncio.to_thread(download_youtube, normalized_url, mode="audio", music=True)
+    if not result:
+        await msg.edit_text("❌ Gagal unduh lagu dari YouTube Music.")
+        return
+
+    filepath, title = result
+    try:
+        if not os.path.isfile(filepath):
+            raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
+        size = os.path.getsize(filepath)
+        if size > MAX_TELEGRAM_FILE_SIZE:
+            await msg.edit_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...")
+            link = await asyncio.to_thread(upload_to_drive, filepath)
+            space = await asyncio.to_thread(get_drive_usage)
+            await update.message.reply_text(f"⚠️ File terlalu besar.\n📁 Diupload ke Google Drive:\n{link}\n\n💾 {space}")
+        else:
+            with open(filepath, "rb") as media_file:
+                await msg.delete()
+                await update.message.reply_audio(
+                    audio=InputFile(media_file, filename=os.path.basename(filepath)),
+                    title=title,
+                )
+    except Exception as error:
+        await msg.edit_text(f"❌ Gagal kirim file: {error}")
+    finally:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+
+
 async def download_instagram_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Pakai: /ig <link Instagram>")

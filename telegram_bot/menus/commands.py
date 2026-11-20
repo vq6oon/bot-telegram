@@ -13,6 +13,7 @@ COMMANDS_CAPTION = (
     "├ /shorten <url> - Memperpendek tautan\n"
     "├ /convert <nama> - Konversi video ke MP3\n"
     "├ /yt <link> - Unduh YouTube video/audio\n"
+    "├ /ytm <link> - Unduh YouTube Music sebagai MP3\n"
     "└ /ig <link> - Unduh Instagram/Reels\n\n"
     "👨‍💻 *Fitur Admin:*\n"
     "├ /cleardrive - Kosongkan folder Google Drive\n"
