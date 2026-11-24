@@ -1,16 +1,17 @@
-"""Telegram handlers for Google Drive commands."""
+"""Handlers for Google Drive commands."""
 import asyncio
 import html
 import logging
 import os
 import tempfile
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 from ..config import (
     DRIVE_ALLOWED_USER_IDS,
     DRIVE_FOLDER_ID,
     DRIVE_MAX_CONCURRENT_UPLOADS,
+    MAX_TELEGRAM_DOWNLOAD_SIZE,
     OWNER_ID,
 )
 from ..handlers.general import get_user_info
@@ -23,224 +24,131 @@ from ..services.drive import (
     upload_to_drive,
 )
 
-# Limit concurrent uploads to protect bandwidth and disk
-_upload_semaphore = asyncio.Semaphore(DRIVE_MAX_CONCURRENT_UPLOADS)
+_upload_sem = asyncio.Semaphore(DRIVE_MAX_CONCURRENT_UPLOADS)
 
 
-def _is_drive_authorized(user_id: int | None) -> bool:
-    """Check user against authorized Drive whitelist."""
-    if not user_id or not DRIVE_ALLOWED_USER_IDS:
-        return False
-    return user_id in DRIVE_ALLOWED_USER_IDS
+def _authorized(user_id: int | None) -> bool:
+    return bool(user_id and user_id in DRIVE_ALLOWED_USER_IDS)
 
 
 def _is_owner(user_id: int | None) -> bool:
-    """Verify that user is the bot owner."""
     return bool(user_id and OWNER_ID > 0 and user_id == OWNER_ID)
+
+
+async def check_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not _authorized(update.effective_user.id):
+        return await update.message.reply_text("Access denied.")
+
+    try:
+        usage = await asyncio.to_thread(get_drive_usage)
+        await update.message.reply_text(f"Google Drive: {usage}")
+    except GoogleDriveAuthError as e:
+        await update.message.reply_text(f"Auth error: {e}")
+    except Exception as e:
+        logging.error("Drive quota error: %s", sanitize_error(e))
+        await update.message.reply_text("Failed to check Drive quota.")
+
+
+async def list_drive_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not _authorized(update.effective_user.id):
+        return await update.message.reply_text("Access denied.")
+
+    msg = await update.message.reply_text("Fetching file list...")
+    try:
+        data = await asyncio.to_thread(list_drive_files_sync, DRIVE_FOLDER_ID)
+        files = data.get("files", [])
+        if not files:
+            return await msg.edit_text("Drive folder is empty.")
+
+        lines = ["Recent Drive files:"]
+        for f in files:
+            name = html.escape(f.get("name", "Untitled"))
+            link = f"https://drive.google.com/file/d/{f['id']}/view"
+            size = int(f.get("size", 0))
+            size_mb = f"{size / (1024 * 1024):.1f} MB" if size else "Unknown"
+            lines.append(f'• <a href="{link}">{name}</a> ({size_mb})')
+
+        lines.append(f"\nUsed: {data.get('usage_fmt', '')} | Free: {data.get('free_fmt', '')}")
+        await msg.edit_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as e:
+        logging.error("List files error: %s", sanitize_error(e))
+        await msg.edit_text("Failed to fetch files.")
+
+
+async def clear_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not _is_owner(update.effective_user.id):
+        return await update.message.reply_text("Access denied. Owner only.")
+
+    keyboard = [[
+        InlineKeyboardButton("Yes, delete all", callback_data="confirm_clear_drive"),
+        InlineKeyboardButton("Cancel", callback_data="cancel_clear_drive"),
+    ]]
+    await update.message.reply_text("Delete all files in Google Drive?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def clear_drive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not query or not query.from_user:
+    if not query or not _is_owner(query.from_user.id):
+        if query:
+            await query.answer("Owner only.", show_alert=True)
         return
 
-    user_id = query.from_user.id
     await query.answer()
-
-    if not _is_owner(user_id):
-        await query.edit_message_text("❌ Kamu tidak punya izin untuk tindakan ini.")
-        return
-
     if query.data == "confirm_clear_drive":
-        await query.edit_message_text("⏳ Sedang membersihkan Google Drive...")
-        try:
-            deleted, total = await asyncio.to_thread(clear_drive_files_sync, DRIVE_FOLDER_ID)
-            if total == 0:
-                await query.edit_message_text("📂 Folder Google Drive sudah kosong.")
-            else:
-                await query.edit_message_text(
-                    f"✅ Berhasil menghapus {deleted} dari {total} file di Google Drive."
-                )
-        except GoogleDriveAuthError:
-            await query.edit_message_text(
-                "❌ <b>Autentikasi Google Drive Gagal.</b>\n"
-                "Token kedaluwarsa atau belum tersedia. Hubungi admin untuk menjalankan <code>get_token.py</code>.",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as e:
-            logging.error("Failed to clear drive: %s", sanitize_error(e))
-            await query.edit_message_text(
-                "❌ Terjadi kesalahan saat membersihkan Google Drive. Silakan coba lagi."
-            )
-
-    elif query.data == "cancel_clear_drive":
-        await query.edit_message_text("🚫 Dibatalkan.")
-
-
-async def check_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_user:
-        return
-    if not _is_drive_authorized(update.effective_user.id):
-        await update.message.reply_text("❌ Kamu tidak punya izin untuk mengakses Google Drive.")
-        return
-
-    try:
-        usage = await asyncio.to_thread(get_drive_usage)
-        await update.message.reply_text(
-            f"💾 <b>Kapasitas Google Drive:</b>\n{html.escape(usage)}",
-            parse_mode=ParseMode.HTML,
-        )
-    except GoogleDriveAuthError:
-        await update.message.reply_text(
-            "❌ <b>Autentikasi Google Drive Gagal.</b>\n"
-            "Token kedaluwarsa atau belum tersedia. Hubungi admin untuk menjalankan <code>get_token.py</code>.",
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as e:
-        logging.error("Failed to check drive: %s", sanitize_error(e))
-        await update.message.reply_text(
-            "❌ Gagal memeriksa kapasitas Google Drive. Silakan coba lagi."
-        )
-
-
-async def clear_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_user:
-        return
-
-    user = update.effective_user
-    logging.info("[CLEARDRIVE] %s requested drive clear", get_user_info(user))
-    if not _is_owner(user.id):
-        await update.message.reply_text("❌ Kamu tidak punya izin untuk menggunakan perintah ini.")
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Ya, hapus semua", callback_data="confirm_clear_drive"),
-            InlineKeyboardButton("❌ Batal", callback_data="cancel_clear_drive"),
-        ]
-    ]
-
-    await update.message.reply_text(
-        "❗ <b>Yakin ingin menghapus semua file dari Google Drive?</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def list_drive_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_user:
-        return
-    if not _is_drive_authorized(update.effective_user.id):
-        await update.message.reply_text("❌ Kamu tidak punya izin untuk mengakses Google Drive.")
-        return
-
-    msg = await update.message.reply_text("🔍 Mengambil daftar file dari Google Drive...")
-    try:
-        data = await asyncio.to_thread(list_drive_files_sync, DRIVE_FOLDER_ID)
-        files = data["files"]
-
-        if not files:
-            await msg.edit_text("📂 Belum ada file yang diunggah ke Google Drive.")
-            return
-
-        lines = ["<b>📁 Daftar file terbaru di Google Drive:</b>", ""]
-        for item in files:
-            size = int(item.get("size", 0))
-            safe_name = html.escape(item.get("name", "Tanpa Nama"))
-            link = f"https://drive.google.com/file/d/{item['id']}/view"
-            size_mb = f"{size / 1024**2:.2f} MB" if size else "???"
-            lines.append(f'📄 <a href="{link}">{safe_name}</a> — {size_mb}')
-
-        lines.append("")
-        lines.append(f"💾 Total terpakai: <b>{html.escape(data['usage_fmt'])}</b>")
-        lines.append(
-            f"📦 Sisa kapasitas: <b>{html.escape(data['free_fmt'])}</b> "
-            f"dari total <b>{html.escape(data['limit_fmt'])}</b>"
-        )
-
-        await msg.edit_text(
-            "\n".join(lines),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-    except GoogleDriveAuthError:
-        await msg.edit_text(
-            "❌ <b>Autentikasi Google Drive Gagal.</b>\n"
-            "Token kedaluwarsa atau belum tersedia. Hubungi admin untuk menjalankan <code>get_token.py</code>.",
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as e:
-        logging.error("Failed to list drive files: %s", sanitize_error(e))
-        await msg.edit_text("❌ Gagal mengambil daftar file Google Drive. Silakan coba lagi.")
+        await query.edit_message_text("Clearing Drive folder...")
+        deleted, total = await asyncio.to_thread(clear_drive_files_sync, DRIVE_FOLDER_ID)
+        await query.edit_message_text(f"Deleted {deleted} of {total} file(s).")
+    else:
+        await query.edit_message_text("Cancelled.")
 
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    msg = update.message
     user = update.effective_user
-    if not message or not user:
+    if not msg or not user or not _authorized(user.id):
+        if msg:
+            await msg.reply_text("Access denied.")
         return
 
-    if not _is_drive_authorized(user.id):
-        await message.reply_text("❌ Kamu tidak punya izin untuk mengunggah file ke Google Drive.")
-        return
+    if not msg.reply_to_message or not msg.reply_to_message.document:
+        return await msg.reply_text("Reply to a file with /upload to send it to Google Drive.")
 
-    if not message.reply_to_message or not message.reply_to_message.document:
-        await message.reply_text(
-            "❗ Gunakan perintah /upload dengan <b>mereply</b> ke file/dokumen yang ingin diunggah.",
-            parse_mode=ParseMode.HTML,
+    doc = msg.reply_to_message.document
+    file_name = doc.file_name or f"document_{doc.file_unique_id}"
+
+    # Telegram bot getFile limit check
+    if getattr(doc, "file_size", None) and doc.file_size > MAX_TELEGRAM_DOWNLOAD_SIZE:
+        size_mb = doc.file_size / (1024 * 1024)
+        return await msg.reply_text(
+            f"File is {size_mb:.1f} MB. Telegram limits bot downloads to 20 MB."
         )
-        return
 
-    document = message.reply_to_message.document
-    file_id = document.file_id
-    file_name = document.file_name or f"document_{document.file_unique_id}"
-    safe_file_name = html.escape(file_name)
-
-    msg = await message.reply_text(
-        f"⏳ Menunggu antrean &amp; mengunduh <code>{safe_file_name}</code> dari Telegram...",
-        parse_mode=ParseMode.HTML,
-    )
-
+    status = await msg.reply_text(f"Downloading {file_name} from Telegram...")
+    temp_path = None
     try:
-        async with _upload_semaphore:
-            tg_file = await context.bot.get_file(file_id)
-            temp_path = None
+        async with _upload_sem:
             try:
-                with tempfile.NamedTemporaryFile(
-                    dir=os.path.dirname(os.path.abspath(__file__)),
-                    prefix="telegram-upload-",
-                    suffix=os.path.splitext(file_name)[1],
-                    delete=False,
-                ) as temp:
-                    temp_path = temp.name
+                tg_file = await context.bot.get_file(doc.file_id)
+            except BadRequest as e:
+                if "file is too big" in str(e).lower():
+                    return await status.edit_text("File exceeds Telegram's 20 MB bot limit.")
+                raise
 
-                await tg_file.download_to_drive(temp_path)
-                await msg.edit_text(
-                    f"☁️ Mengunggah <code>{safe_file_name}</code> ke Google Drive...",
-                    parse_mode=ParseMode.HTML,
-                )
-                link = await asyncio.to_thread(upload_to_drive, temp_path, DRIVE_FOLDER_ID, file_name)
-            finally:
-                if temp_path and os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError as cleanup_err:
-                        logging.warning("Failed to remove temporary file: %s", sanitize_error(cleanup_err))
+            with tempfile.NamedTemporaryFile(prefix="tg-upload-", delete=False) as tmp:
+                temp_path = tmp.name
+
+            await tg_file.download_to_drive(temp_path)
+            await status.edit_text("Uploading to Google Drive...")
+            link = await asyncio.to_thread(upload_to_drive, temp_path, DRIVE_FOLDER_ID, file_name)
 
         logging.info("[UPLOAD] %s uploaded: %s", get_user_info(user), file_name)
-        await msg.edit_text(
-            f"✅ <b>File berhasil diunggah!</b>\n\n"
-            f"📄 <code>{safe_file_name}</code>\n"
-            f'🔗 <a href="{link}">Buka di Google Drive</a>',
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-    except GoogleDriveAuthError:
-        await msg.edit_text(
-            "❌ <b>Autentikasi Google Drive Gagal.</b>\n"
-            "Token kedaluwarsa atau belum tersedia. Hubungi admin untuk menjalankan <code>get_token.py</code>.",
-            parse_mode=ParseMode.HTML,
-        )
+        await status.edit_text(f"Uploaded: {link}", disable_web_page_preview=True)
     except Exception as e:
-        logging.error("Failed to upload to Drive: %s", sanitize_error(e))
-        await msg.edit_text("❌ Gagal mengunggah file ke Google Drive. Silakan coba lagi.")
+        logging.error("Upload failed: %s", sanitize_error(e))
+        await status.edit_text("Upload failed.")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
