@@ -1,4 +1,4 @@
-"""Media commands (/yt, /ytm, /ig) with button locks, Drive upload semaphore, and live progress."""
+"""Media commands (/yt, /ytm, /ig) with button locks, Drive deduplication cache, and live progress."""
 import asyncio
 import html
 import logging
@@ -13,8 +13,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Inpu
 from telegram.error import BadRequest, RetryAfter, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
-from ..config import MAX_TELEGRAM_DOWNLOAD_SIZE, MAX_TELEGRAM_FILE_SIZE
-from ..services.drive import sanitize_error, upload_to_drive
+from ..config import DRIVE_FOLDER_ID, MAX_TELEGRAM_DOWNLOAD_SIZE, MAX_TELEGRAM_FILE_SIZE
+from ..services.drive import (
+    build_youtube_app_properties,
+    find_cached_youtube_file,
+    sanitize_error,
+    upload_to_drive,
+)
 from ..services.job_tracker import (
     add_job,
     format_active_jobs,
@@ -73,6 +78,7 @@ async def _upload_to_drive_guarded(
     title: str,
     *,
     job_id: str | None = None,
+    app_properties: dict[str, str] | None = None,
 ) -> str:
     """Acquire shared Drive upload semaphore and stream chunked upload with progress updates."""
     size_mb = os.path.getsize(filepath) / (1024 * 1024)
@@ -97,6 +103,7 @@ async def _upload_to_drive_guarded(
                 loop,
             )
 
+    target_folder = DRIVE_FOLDER_ID or None
     async with get_drive_upload_semaphore():
         if job_id:
             update_job(job_id, stage="Uploading to Drive", progress=0)
@@ -104,7 +111,38 @@ async def _upload_to_drive_guarded(
             status_msg,
             f"File is {size_mb:.1f} MB. Uploading to Google Drive (0%)...",
         )
-        return await asyncio.to_thread(upload_to_drive, filepath, None, None, _on_upload_progress)
+        return await asyncio.to_thread(
+            upload_to_drive,
+            filepath,
+            target_folder,
+            None,
+            _on_upload_progress,
+            app_properties,
+        )
+
+
+async def _upload_and_notify_drive(
+    filepath: str,
+    status_msg,
+    title: str,
+    log_tag: str,
+    target_id: int | str,
+    *,
+    job_id: str | None = None,
+    app_properties: dict[str, str] | None = None,
+) -> str:
+    link = await _upload_to_drive_guarded(
+        filepath,
+        status_msg,
+        title,
+        job_id=job_id,
+        app_properties=app_properties,
+    )
+    await _safe_edit_text(
+        status_msg, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
+    )
+    logging.info("[%s] Uploaded to Drive for %s: %s (%s)", log_tag, target_id, title, link)
+    return link
 
 
 async def active_downloads_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,9 +317,35 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.bot_data.pop(f"yt_{token}", None)
     url = session["url"]
     title = session["title"]
+    video_id = session.get("video_id") or ""
+    user_tag = _user_tag(update.effective_user)
+
+    if video_id:
+        try:
+            cached = await asyncio.to_thread(
+                find_cached_youtube_file,
+                video_id,
+                mode,
+                resolution or None,
+                DRIVE_FOLDER_ID or None,
+            )
+            if cached:
+                size_note = f" ({cached['size'] / 1024**2:.1f} MB)" if cached.get("size") else ""
+                logging.info(
+                    "[YT] Cache hit on Drive for %s (%s %s): %s",
+                    video_id,
+                    mode,
+                    resolution or "default",
+                    cached["link"],
+                )
+                return await query.edit_message_text(
+                    f"Already available on Google Drive{size_note}:\n{cached['link']}",
+                    disable_web_page_preview=True,
+                )
+        except Exception as cache_err:
+            logging.warning("[YT] Drive cache lookup skipped: %s", sanitize_error(cache_err))
 
     job_id = token[:4]
-    user_tag = _user_tag(update.effective_user)
     logging.info(
         "[YT] %s queued %s download (res: %s) for '%s'",
         user_tag,
@@ -294,6 +358,8 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     filepath = None
     loop = asyncio.get_running_loop()
+    yt_props = build_youtube_app_properties(video_id, mode, resolution or None) if video_id else None
+
     try:
         async with get_download_semaphore():
             update_job(job_id, stage="Downloading")
@@ -321,11 +387,15 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         size = os.path.getsize(filepath)
         if size > MAX_TELEGRAM_FILE_SIZE:
-            link = await _upload_to_drive_guarded(filepath, status, final_title, job_id=job_id)
-            await _safe_edit_text(
-                status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
+            await _upload_and_notify_drive(
+                filepath,
+                status,
+                final_title,
+                "YT",
+                f"chat {query.message.chat_id}",
+                job_id=job_id,
+                app_properties=yt_props,
             )
-            logging.info("[YT] Uploaded to Drive for chat %s: %s (%s)", query.message.chat_id, final_title, link)
         else:
             try:
                 with open(filepath, "rb") as media_file:
@@ -352,11 +422,15 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     chat_id=query.message.chat_id,
                     text="Telegram upload limit reached. Routing to Google Drive...",
                 )
-                link = await _upload_to_drive_guarded(filepath, fallback, final_title, job_id=job_id)
-                await _safe_edit_text(
-                    fallback, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
+                await _upload_and_notify_drive(
+                    filepath,
+                    fallback,
+                    final_title,
+                    "YT",
+                    f"chat {query.message.chat_id}",
+                    job_id=job_id,
+                    app_properties=yt_props,
                 )
-                logging.info("[YT] Uploaded to Drive for chat %s: %s (%s)", query.message.chat_id, final_title, link)
     except Exception as e:
         logging.error("Processing error: %s", sanitize_error(e))
         await context.bot.send_message(chat_id=query.message.chat_id, text="Failed to process video.")
@@ -400,9 +474,7 @@ async def download_youtube_music_command(update: Update, context: ContextTypes.D
             return await status.edit_text("Failed to download track.")
         filepath, title = result
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
-            link = await _upload_to_drive_guarded(filepath, status, title)
-            await _safe_edit_text(status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
-            logging.info("[YTM] Uploaded to Drive for chat %s: %s (%s)", chat_id, title, link)
+            await _upload_and_notify_drive(filepath, status, title, "YTM", f"chat {chat_id}")
         else:
             with open(filepath, "rb") as f:
                 await status.delete()
@@ -454,9 +526,7 @@ async def download_instagram_command(update: Update, context: ContextTypes.DEFAU
             filepath = os.path.splitext(filepath)[0] + ".mp4"
 
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
-            link = await _upload_to_drive_guarded(filepath, status, title)
-            await _safe_edit_text(status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
-            logging.info("[IG] Uploaded to Drive for chat %s: %s (%s)", chat_id, title, link)
+            await _upload_and_notify_drive(filepath, status, title, "IG", f"chat {chat_id}")
         else:
             with open(filepath, "rb") as f:
                 await status.delete()
@@ -503,9 +573,9 @@ async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     try:
         filename = await asyncio.to_thread(download_tiktok_file, url, ext)
         if os.path.getsize(filename) > MAX_TELEGRAM_FILE_SIZE:
-            link = await _upload_to_drive_guarded(filename, status, data.get("title", "TikTok"))
-            await _safe_edit_text(status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
-            logging.info("[TIKTOK] Uploaded %s to Drive for user %s: %s", mode, user_id, link)
+            await _upload_and_notify_drive(
+                filename, status, data.get("title", "TikTok"), "TIKTOK", f"user {user_id}"
+            )
         else:
             with open(filename, "rb") as f:
                 if mode == "audio":

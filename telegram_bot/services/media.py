@@ -3,7 +3,6 @@ import logging
 import os
 import shutil
 import tempfile
-import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -178,7 +177,8 @@ def download_youtube(
         return None
 
     os.makedirs("youtube-dump", exist_ok=True)
-    template = outtmpl or "youtube-dump/%(id)s_%(title).80s.%(ext)s"
+    quality_tag = f"_{resolution}p" if resolution else ""
+    template = outtmpl or f"youtube-dump/%(id)s{quality_tag}_%(title).80s.%(ext)s"
 
     def _hook(d: dict) -> None:
         status = d.get("status")
