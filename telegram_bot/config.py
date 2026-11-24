@@ -59,3 +59,19 @@ DRIVE_UPLOAD_CHUNK_BYTES = max(1, _int_env("DRIVE_UPLOAD_CHUNK_SIZE_MB", 8)) * 1
 # Media downloads
 MAX_CONCURRENT_DOWNLOADS = max(1, _int_env("MAX_CONCURRENT_DOWNLOADS", 3))
 DOWNLOAD_RATELIMIT_BYTES = _int_env("DOWNLOAD_RATELIMIT_KBPS", 0) * 1024
+
+
+def get_cookie_file() -> str | None:
+    custom = os.environ.get("COOKIE_FILE_PATH", "").strip()
+    if custom:
+        p = Path(custom)
+        if p.is_file() and p.stat().st_size > 0:
+            return str(p.resolve())
+    root_cookie = Path(__file__).resolve().parents[1] / "cookies.txt"
+    if root_cookie.is_file() and root_cookie.stat().st_size > 0:
+        return str(root_cookie.resolve())
+    cwd_cookie = Path.cwd() / "cookies.txt"
+    if cwd_cookie.is_file() and cwd_cookie.stat().st_size > 0:
+        return str(cwd_cookie.resolve())
+    return None
+

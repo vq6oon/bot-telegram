@@ -1,6 +1,8 @@
 """Tests for new concurrency, button locks, and 20MB limit checks."""
 import asyncio
+import os
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -78,6 +80,55 @@ class FeatureUpgradeTests(unittest.IsolatedAsyncioTestCase):
         message.reply_text.assert_awaited_once()
         sent_text = message.reply_text.call_args[0][0]
         self.assertIn("20 MB", sent_text)
+
+    def test_get_cookie_file_handles_missing_and_existing(self):
+        import tempfile
+        from telegram_bot import config
+
+        with patch.dict(os.environ, {"COOKIE_FILE_PATH": "non_existent_file.txt"}):
+            with patch.object(config.Path, "is_file", return_value=False):
+                self.assertIsNone(config.get_cookie_file())
+
+        with tempfile.NamedTemporaryFile("w", delete=False) as tf:
+            tf.write("# Netscape HTTP Cookie File\n.youtube.com TRUE / FALSE 1700000000 SID abc\n")
+            temp_path = tf.name
+
+        try:
+            with patch.dict(os.environ, {"COOKIE_FILE_PATH": temp_path}):
+                self.assertEqual(config.get_cookie_file(), str(Path(temp_path).resolve()))
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_yt_dlp_options_include_cookiefile_and_runtimes(self):
+        captured_opts = {}
+
+        class DummyYDL:
+            def __init__(self, opts):
+                captured_opts.update(opts)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def extract_info(self, url, download=True):
+                return {"id": "dummy123", "title": "Test Title"}
+
+            def prepare_filename(self, info):
+                return "youtube-dump/dummy123_Test_Title.mp4"
+
+        with patch.object(media_service, "get_cookie_file", return_value="/tmp/test_cookies.txt"):
+            with patch.object(media_service.yt_dlp, "YoutubeDL", DummyYDL):
+                media_service.extract_youtube_info("https://youtu.be/dummy123")
+                self.assertEqual(captured_opts.get("cookiefile"), "/tmp/test_cookies.txt")
+                self.assertIn("deno", captured_opts.get("js_runtimes", {}))
+                self.assertIn("node", captured_opts.get("js_runtimes", {}))
+
+                captured_opts.clear()
+                media_service.download_youtube("https://youtu.be/dummy123")
+                self.assertEqual(captured_opts.get("cookiefile"), "/tmp/test_cookies.txt")
 
 
 if __name__ == "__main__":

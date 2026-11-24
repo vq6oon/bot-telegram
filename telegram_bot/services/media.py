@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import requests
 import yt_dlp
 from .drive import sanitize_error
-from ..config import DOWNLOAD_RATELIMIT_BYTES
+from ..config import DOWNLOAD_RATELIMIT_BYTES, get_cookie_file
 
 
 def normalize_media_url(url: str, platform: str) -> str | None:
@@ -65,9 +65,13 @@ def extract_youtube_info(url: str) -> dict:
     opts = {
         "quiet": True,
         "noplaylist": True,
-        "js_runtimes": {"node": {}},
+        "js_runtimes": {"deno": {}, "node": {}},
         "remote_components": ["ejs:github"],
     }
+    cookie_file = get_cookie_file()
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False) or {}
 
@@ -92,10 +96,13 @@ def download_youtube(
         "noplaylist": True,
         "restrictfilenames": True,
         "outtmpl": template,
-        "js_runtimes": {"node": {}},
+        "js_runtimes": {"deno": {}, "node": {}},
         "remote_components": ["ejs:github"],
         "retries": 3,
     }
+    cookie_file = get_cookie_file()
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
 
     if DOWNLOAD_RATELIMIT_BYTES > 0:
         opts["ratelimit"] = DOWNLOAD_RATELIMIT_BYTES
