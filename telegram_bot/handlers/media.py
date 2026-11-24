@@ -1,4 +1,4 @@
-"""Media commands (/yt, /ytm, /ig) with button ownership locks, thread-safe progress, and Drive fallback."""
+"""Media commands (/yt, /ytm, /ig) with button locks, Drive upload semaphore, and live progress."""
 import asyncio
 import html
 import logging
@@ -19,6 +19,7 @@ from ..services.job_tracker import (
     add_job,
     format_active_jobs,
     get_download_semaphore,
+    get_drive_upload_semaphore,
     remove_job,
     snapshot,
     update_job,
@@ -66,6 +67,46 @@ async def _safe_edit_text(message, text: str, **kwargs) -> None:
         pass
 
 
+async def _upload_to_drive_guarded(
+    filepath: str,
+    status_msg,
+    title: str,
+    *,
+    job_id: str | None = None,
+) -> str:
+    """Acquire shared Drive upload semaphore and stream chunked upload with progress updates."""
+    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+    loop = asyncio.get_running_loop()
+    last_edit = [0.0]
+
+    if job_id:
+        update_job(job_id, stage="Queued for Drive", progress=0)
+    await _safe_edit_text(
+        status_msg,
+        f"File is {size_mb:.1f} MB. Queued for Google Drive upload...",
+    )
+
+    def _on_upload_progress(pct: int) -> None:
+        if job_id:
+            update_job(job_id, stage="Uploading to Drive", progress=pct)
+        now = time.time()
+        if now - last_edit[0] >= 4.0:
+            last_edit[0] = now
+            asyncio.run_coroutine_threadsafe(
+                _safe_edit_text(status_msg, f"Uploading {title} to Google Drive: {pct}%"),
+                loop,
+            )
+
+    async with get_drive_upload_semaphore():
+        if job_id:
+            update_job(job_id, stage="Uploading to Drive", progress=0)
+        await _safe_edit_text(
+            status_msg,
+            f"File is {size_mb:.1f} MB. Uploading to Google Drive (0%)...",
+        )
+        return await asyncio.to_thread(upload_to_drive, filepath, None, None, _on_upload_progress)
+
+
 async def active_downloads_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         logging.info("[STATUS] %s checked active download stack", _safe_user(update))
@@ -86,7 +127,7 @@ async def offer_youtube_format(update: Update, url: str, context: ContextTypes.D
         logging.error("Failed to fetch YouTube metadata: %s", err_text)
         if "sign in to confirm" in str(e).lower() or "not a bot" in str(e).lower():
             await update.message.reply_text(
-                "⚠️ YouTube requires valid authentication cookies on the server. "
+                "YouTube requires valid authentication cookies on the server. "
                 "Please refresh <code>cookies.txt</code> and try again.",
                 parse_mode="HTML",
             )
@@ -191,7 +232,10 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             return await query.edit_message_text("No subtitles available for this video.")
 
         buttons = [
-            InlineKeyboardButton(f"{flag_for_lang(lang)} {lang.upper()}", callback_data=f"yt|sub|{lang}|{token}")
+            InlineKeyboardButton(
+                f"{flag_for_lang(lang)} ({lang.upper()})" if flag_for_lang(lang) else lang.upper(),
+                callback_data=f"yt|sub|{lang}|{token}",
+            )
             for lang in langs
         ]
         rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
@@ -251,8 +295,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     filepath = None
     loop = asyncio.get_running_loop()
     try:
-        sem = get_download_semaphore()
-        async with sem:
+        async with get_download_semaphore():
             update_job(job_id, stage="Downloading")
             await _safe_edit_text(status, f"Downloading: {title}...")
 
@@ -275,50 +318,45 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return await _safe_edit_text(status, "Download failed. Format may not be available.")
 
             filepath, final_title = result
-            size = os.path.getsize(filepath)
 
-            if size > MAX_TELEGRAM_FILE_SIZE:
-                update_job(job_id, stage="Uploading to Drive", progress=0)
-                await _safe_edit_text(
-                    status, f"File is {size / 1024**2:.1f} MB. Uploading to Google Drive..."
+        size = os.path.getsize(filepath)
+        if size > MAX_TELEGRAM_FILE_SIZE:
+            link = await _upload_to_drive_guarded(filepath, status, final_title, job_id=job_id)
+            await _safe_edit_text(
+                status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
+            )
+            logging.info("[YT] Uploaded to Drive for chat %s: %s (%s)", query.message.chat_id, final_title, link)
+        else:
+            try:
+                with open(filepath, "rb") as media_file:
+                    await status.delete()
+                    if mode == "audio":
+                        await context.bot.send_audio(
+                            chat_id=query.message.chat_id,
+                            audio=InputFile(media_file, filename=os.path.basename(filepath)),
+                            title=final_title,
+                        )
+                    else:
+                        await context.bot.send_document(
+                            chat_id=query.message.chat_id,
+                            document=InputFile(media_file, filename=os.path.basename(filepath)),
+                            caption=final_title,
+                        )
+                logging.info("[YT] Sent %s to chat %s: %s", mode, query.message.chat_id, final_title)
+            except (BadRequest, TimedOut) as tg_err:
+                logging.warning(
+                    "Telegram direct send failed (%s); falling back to Google Drive.",
+                    sanitize_error(tg_err),
                 )
-                link = await asyncio.to_thread(upload_to_drive, filepath)
+                fallback = await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="Telegram upload limit reached. Routing to Google Drive...",
+                )
+                link = await _upload_to_drive_guarded(filepath, fallback, final_title, job_id=job_id)
                 await _safe_edit_text(
-                    status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
+                    fallback, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
                 )
                 logging.info("[YT] Uploaded to Drive for chat %s: %s (%s)", query.message.chat_id, final_title, link)
-            else:
-                try:
-                    with open(filepath, "rb") as media_file:
-                        await status.delete()
-                        if mode == "audio":
-                            await context.bot.send_audio(
-                                chat_id=query.message.chat_id,
-                                audio=InputFile(media_file, filename=os.path.basename(filepath)),
-                                title=final_title,
-                            )
-                        else:
-                            await context.bot.send_document(
-                                chat_id=query.message.chat_id,
-                                document=InputFile(media_file, filename=os.path.basename(filepath)),
-                                caption=final_title,
-                            )
-                    logging.info("[YT] Sent %s to chat %s: %s", mode, query.message.chat_id, final_title)
-                except (BadRequest, TimedOut) as tg_err:
-                    logging.warning(
-                        "Telegram direct send failed (%s); falling back to Google Drive.",
-                        sanitize_error(tg_err),
-                    )
-                    fallback = await context.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text="Telegram upload limit reached. Uploading to Google Drive...",
-                    )
-                    update_job(job_id, stage="Uploading to Drive", progress=0)
-                    link = await asyncio.to_thread(upload_to_drive, filepath)
-                    await _safe_edit_text(
-                        fallback, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
-                    )
-                    logging.info("[YT] Uploaded to Drive for chat %s: %s (%s)", query.message.chat_id, final_title, link)
     except Exception as e:
         logging.error("Processing error: %s", sanitize_error(e))
         await context.bot.send_message(chat_id=query.message.chat_id, text="Failed to process video.")
@@ -362,9 +400,8 @@ async def download_youtube_music_command(update: Update, context: ContextTypes.D
             return await status.edit_text("Failed to download track.")
         filepath, title = result
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
-            await status.edit_text("File exceeds 50 MB. Uploading to Google Drive...")
-            link = await asyncio.to_thread(upload_to_drive, filepath)
-            await status.edit_text(f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
+            link = await _upload_to_drive_guarded(filepath, status, title)
+            await _safe_edit_text(status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
             logging.info("[YTM] Uploaded to Drive for chat %s: %s (%s)", chat_id, title, link)
         else:
             with open(filepath, "rb") as f:
@@ -417,8 +454,8 @@ async def download_instagram_command(update: Update, context: ContextTypes.DEFAU
             filepath = os.path.splitext(filepath)[0] + ".mp4"
 
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
-            link = await asyncio.to_thread(upload_to_drive, filepath)
-            await status.edit_text(f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
+            link = await _upload_to_drive_guarded(filepath, status, title)
+            await _safe_edit_text(status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
             logging.info("[IG] Uploaded to Drive for chat %s: %s (%s)", chat_id, title, link)
         else:
             with open(filepath, "rb") as f:
@@ -466,8 +503,8 @@ async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     try:
         filename = await asyncio.to_thread(download_tiktok_file, url, ext)
         if os.path.getsize(filename) > MAX_TELEGRAM_FILE_SIZE:
-            link = await asyncio.to_thread(upload_to_drive, filename)
-            await status.edit_text(f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
+            link = await _upload_to_drive_guarded(filename, status, data.get("title", "TikTok"))
+            await _safe_edit_text(status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
             logging.info("[TIKTOK] Uploaded %s to Drive for user %s: %s", mode, user_id, link)
         else:
             with open(filename, "rb") as f:
@@ -557,9 +594,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "tiktok.com" in text:
         logging.info("[TIKTOK] %s sent link: %s", _user_tag(user), text)
-        msg = await update.message.reply_text("🔍 Mendeteksi link TikTok...")
+        msg = await update.message.reply_text("Mendeteksi link TikTok...")
         try:
-            r = requests.get("https://tikwm.com/api/", params={"url": text})
+            r = await asyncio.to_thread(
+                requests.get, "https://tikwm.com/api/", params={"url": text}, timeout=30
+            )
             res = r.json()
             data = res.get("data")
             if res.get("code") == 0 and data:
@@ -571,12 +610,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_media_group(chat_id=user.id, media=media_group)
                         logging.info("[TIKTOK] Delivered photo album to %s", user.id)
                         await update.message.reply_text(
-                            "✅ Album foto TikTok dikirim lewat chat pribadi Anda.",
+                            "Album foto TikTok dikirim lewat chat pribadi Anda.",
                             reply_to_message_id=update.message.message_id,
                         )
                     except Exception as e:
                         logging.error("Failed to send TikTok album privately: %s", sanitize_error(e))
-                        await msg.edit_text("❌ Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
+                        await msg.edit_text("Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
                     else:
                         await msg.delete()
                     return
@@ -597,13 +636,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text="Pilih format TikTok ini. Hasil hanya dikirim lewat chat pribadi Anda:",
                         reply_markup=InlineKeyboardMarkup([
                             [
-                                InlineKeyboardButton("🎞️ Video", callback_data=f"tt|video|{short_id}"),
-                                InlineKeyboardButton("🎧 Audio", callback_data=f"tt|audio|{short_id}")
+                                InlineKeyboardButton("Video", callback_data=f"tt|video|{short_id}"),
+                                InlineKeyboardButton("Audio", callback_data=f"tt|audio|{short_id}"),
                             ]
                         ]),
                     )
                     await update.message.reply_text(
-                        "✅ Pilihan dikirim lewat chat pribadi Anda. Unduhan juga akan dikirim ke chat pribadi.",
+                        "Pilihan dikirim lewat chat pribadi Anda. Unduhan juga akan dikirim ke chat pribadi.",
                         reply_to_message_id=update.message.message_id,
                     )
                     logging.info("[TIKTOK] Sent format options to %s", user.id)
@@ -611,13 +650,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.info("TikTok private delivery unavailable: %s", sanitize_error(e))
                     context.user_data.pop(f"tt_{short_id}", None)
-                    await msg.edit_text("❌ Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
+                    await msg.edit_text("Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
                 return
 
-            await msg.edit_text("❌ Gagal unduh TikTok: Respon tidak valid.")
+            await msg.edit_text("Gagal unduh TikTok: Respon tidak valid.")
         except Exception as e:
             logging.error("TikTok error: %s", sanitize_error(e))
-            await msg.edit_text(f"❌ Gagal unduh TikTok: {sanitize_error(e)}")
+            await msg.edit_text(f"Gagal unduh TikTok: {sanitize_error(e)}")
         return
 
     await update.message.reply_text("Send a YouTube, TikTok, or Instagram link.")

@@ -1,20 +1,41 @@
-"""Track active downloads and limit concurrency."""
+"""Track active downloads and enforce download and Drive upload concurrency limits."""
 import asyncio
 import html
 import threading
 import time
-from ..config import MAX_CONCURRENT_DOWNLOADS
+from ..config import DRIVE_MAX_CONCURRENT_UPLOADS, MAX_CONCURRENT_DOWNLOADS
 
 _lock = threading.Lock()
 _jobs: dict[str, dict] = {}
-_semaphore: asyncio.Semaphore | None = None
+_download_semaphores: dict[int, asyncio.Semaphore] = {}
+_drive_upload_semaphores: dict[int, asyncio.Semaphore] = {}
+
+
+def _get_loop_key() -> int:
+    try:
+        return id(asyncio.get_running_loop())
+    except RuntimeError:
+        return 0
+
+
+def _get_loop_semaphore(pool: dict[int, asyncio.Semaphore], limit: int) -> asyncio.Semaphore:
+    key = _get_loop_key()
+    with _lock:
+        sem = pool.get(key)
+        if sem is None:
+            sem = asyncio.Semaphore(limit)
+            pool[key] = sem
+        return sem
 
 
 def get_download_semaphore() -> asyncio.Semaphore:
-    global _semaphore
-    if _semaphore is None:
-        _semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-    return _semaphore
+    """Return a per-event-loop semaphore capping concurrent media downloads."""
+    return _get_loop_semaphore(_download_semaphores, MAX_CONCURRENT_DOWNLOADS)
+
+
+def get_drive_upload_semaphore() -> asyncio.Semaphore:
+    """Return a per-event-loop semaphore capping concurrent Google Drive uploads."""
+    return _get_loop_semaphore(_drive_upload_semaphores, DRIVE_MAX_CONCURRENT_UPLOADS)
 
 
 def add_job(job_id: str, user_name: str, title: str):
@@ -59,5 +80,5 @@ def format_active_jobs() -> str:
             title = html.escape(info["title"][:45])
             stage = info["stage"]
             pct = info["progress"]
-            lines.append(f"• [{jid}] {title} — {user} | {stage} ({pct}%)")
+            lines.append(f"- [{jid}] {title} - {user} | {stage} ({pct}%)")
         return "\n".join(lines)

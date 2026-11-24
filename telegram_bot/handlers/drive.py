@@ -1,4 +1,4 @@
-"""Handlers for Google Drive commands."""
+"""Handlers for Google Drive commands using shared upload concurrency control."""
 import asyncio
 import html
 import logging
@@ -10,7 +10,6 @@ from telegram.ext import ContextTypes
 from ..config import (
     DRIVE_ALLOWED_USER_IDS,
     DRIVE_FOLDER_ID,
-    DRIVE_MAX_CONCURRENT_UPLOADS,
     MAX_TELEGRAM_DOWNLOAD_SIZE,
     OWNER_ID,
 )
@@ -23,8 +22,7 @@ from ..services.drive import (
     sanitize_error,
     upload_to_drive,
 )
-
-_upload_sem = asyncio.Semaphore(DRIVE_MAX_CONCURRENT_UPLOADS)
+from ..services.job_tracker import get_drive_upload_semaphore
 
 
 def _authorized(user_id: int | None) -> bool:
@@ -37,7 +35,9 @@ def _is_owner(user_id: int | None) -> bool:
 
 async def check_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not _authorized(update.effective_user.id):
-        return await update.message.reply_text("Access denied.")
+        if update.message:
+            await update.message.reply_text("Access denied.")
+        return
 
     try:
         usage = await asyncio.to_thread(get_drive_usage)
@@ -51,7 +51,9 @@ async def check_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_drive_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not _authorized(update.effective_user.id):
-        return await update.message.reply_text("Access denied.")
+        if update.message:
+            await update.message.reply_text("Access denied.")
+        return
 
     msg = await update.message.reply_text("Fetching file list...")
     try:
@@ -77,7 +79,9 @@ async def list_drive_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not _is_owner(update.effective_user.id):
-        return await update.message.reply_text("Access denied. Owner only.")
+        if update.message:
+            await update.message.reply_text("Access denied. Owner only.")
+        return
 
     keyboard = [[
         InlineKeyboardButton("Yes, delete all", callback_data="confirm_clear_drive"),
@@ -126,7 +130,7 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await msg.reply_text(f"Downloading {file_name} from Telegram...")
     temp_path = None
     try:
-        async with _upload_sem:
+        async with get_drive_upload_semaphore():
             try:
                 tg_file = await context.bot.get_file(doc.file_id)
             except BadRequest as e:
