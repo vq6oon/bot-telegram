@@ -44,6 +44,11 @@ def remove_job(job_id: str):
         _jobs.pop(job_id, None)
 
 
+def snapshot() -> dict[str, dict]:
+    with _lock:
+        return dict(_jobs)
+
+
 def format_active_jobs() -> str:
     with _lock:
         if not _jobs:
