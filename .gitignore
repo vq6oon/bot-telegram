@@ -1,4 +1,7 @@
 # Secrets
+cookies.txt
+/cookies.txt
+*.cookies.txt
 credentials.json
 /credentials.json
 token.json
@@ -15,12 +18,17 @@ token.json
 *.py[cod]
 
 # Dependencies and generated media
+/.venv/
+/venv/
+node_modules/
 /node_modules/
+deno.lock
 /youtube-dump/
 /converted/
 /temp_upload/
 /uploads/
 /_uploads/
+/subs/
 
 # Local editor state
 /.ropeproject/
