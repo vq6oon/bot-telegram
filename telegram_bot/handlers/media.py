@@ -1,469 +1,363 @@
+"""Media commands (/yt, /ytm, /ig) with button ownership locks and Drive fallback."""
 import asyncio
-import html
 import logging
-import mimetypes
 import os
-import subprocess
 import time
 import uuid
 from urllib.parse import urlparse
-
 import requests
-import telegram
-import yt_dlp
-from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto, Update
+from telegram.error import BadRequest, TimedOut
 from telegram.ext import ContextTypes
 
-from ..services.drive import get_drive_usage, upload_to_drive, sanitize_error
-from ..services.media import download_file_with_progress, download_youtube, normalize_media_url
+from ..config import MAX_TELEGRAM_DOWNLOAD_SIZE, MAX_TELEGRAM_FILE_SIZE
+from ..services.drive import sanitize_error, upload_to_drive
+from ..services.job_tracker import (
+    add_job,
+    format_active_jobs,
+    get_download_semaphore,
+    remove_job,
+    update_job,
+)
+from ..services.media import download_youtube, extract_youtube_info, normalize_media_url
 from ..services.subtitles import download_subtitle, flag_for_lang
 from ..services.tiktok import download_tiktok_file, is_tiktok_owner
-from ..config import MAX_TELEGRAM_FILE_SIZE
-
-async def _upload_media_to_drive(file_path: str, title: str, status_msg):
-    """Upload media without blocking Telegram's async event loop."""
-    try:
-        safe_title = html.escape(title)
-        await status_msg.edit_text(
-            f"⏳ Mengunggah <code>{safe_title}</code> ke Google Drive...",
-            parse_mode=telegram.constants.ParseMode.HTML,
-        )
-        link = await asyncio.to_thread(upload_to_drive, file_path)
-        space = await asyncio.to_thread(get_drive_usage)
-        await status_msg.edit_text(
-            f"✅ File tersimpan di Google Drive:\n{link}\n\n💾 {html.escape(space)}",
-            disable_web_page_preview=True,
-        )
-        return link
-    except Exception as error:
-        logging.error("Drive media upload failed: %s", sanitize_error(error))
-        await status_msg.edit_text("❌ Gagal mengunggah file ke Google Drive. Silakan coba lagi.")
-        return None
 
 
-async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg.reply_to_message or not msg.reply_to_message.video:
-        return await msg.reply_text("❗Balas video yang ingin diubah ke MP3.\n\nContoh: `/convert ujan`", parse_mode="Markdown")
+def _user_tag(user) -> str:
+    if not user:
+        return "Unknown"
+    return f"@{user.username}" if user.username else (user.first_name or str(user.id))
 
-    new_name = (context.args[0] if context.args else "audio") + ".mp3"
-    video = msg.reply_to_message.video
-    file = await video.get_file()
 
-    os.makedirs("converted", exist_ok=True)
-    input_path = "converted/input.mp4"
-    output_path = f"converted/{new_name}"
+async def active_downloads_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        await update.message.reply_text(format_active_jobs())
 
-    status_msg = await msg.reply_text("📥 Mengunduh video...")
-
-    # Simulated progress updates (download_to_drive does not stream)
-    for i in range(0, 101, 20):
-        try:
-            bar = "█" * (i // 5) + "░" * ((100 - i) // 5)
-            await status_msg.edit_text(f"📥 Mengunduh video...\n[{bar}] {i}%")
-            await asyncio.sleep(0.3)
-        except:
-            pass
-
-    try:
-        await file.download_to_drive(input_path)
-
-        # Convert to audio via ffmpeg
-        await status_msg.edit_text("🔄 Mengonversi ke audio...")
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", input_path, output_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
-
-        logging.info(f"[Convert] @{msg.from_user.username or '-'} ({msg.from_user.full_name} / {msg.from_user.id}) mengonversi video jadi: {new_name}")
-
-        if os.path.getsize(output_path) > MAX_TELEGRAM_FILE_SIZE:
-            await status_msg.edit_text("📤 File besar, mengunggah ke Google Drive...")
-            await _upload_media_to_drive(output_path, new_name, status_msg)
-        else:
-            with open(output_path, "rb") as f:
-                await status_msg.delete()
-                await msg.reply_audio(audio=InputFile(f, filename=new_name))
-
-    except Exception as e:
-        try:
-            await status_msg.edit_text(f"❌ Gagal konversi: {sanitize_error(e)}")
-        except Exception:
-            await msg.reply_text(f"❌ Gagal konversi: {sanitize_error(e)}")
-    finally:
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                os.remove(path)
 
 async def offer_youtube_format(update: Update, url: str, context: ContextTypes.DEFAULT_TYPE):
-    # Keep callback payloads short; Telegram caps callback_data at 64 bytes.
-    token = uuid.uuid4().hex[:12]
-    context.bot_data[f"yt_{token}"] = url
-    try:
-        with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True}) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
-        subtitle_langs = list(info.get("subtitles", {}).keys())
-    except Exception as e:
-        logging.error(f"Gagal deteksi subtitle: {e}")
-        subtitle_langs = []
+    user = update.effective_user
+    info = await asyncio.to_thread(extract_youtube_info, url)
+    title = info.get("title", "YouTube Video")
 
-    preferred_langs = ["id", "en", "es"]
-    available_langs = [lang for lang in preferred_langs if lang in subtitle_langs]
+    token = uuid.uuid4().hex[:8]
+    context.bot_data[f"yt_{token}"] = {
+        "url": url,
+        "owner_id": user.id if user else None,
+        "title": title,
+    }
 
-    keyboard = [[
-        InlineKeyboardButton("🎞️ 360p", callback_data=f"yt|video|360|{token}"),
-        InlineKeyboardButton("🎞️ 720p", callback_data=f"yt|video|720|{token}"),
-        InlineKeyboardButton("🎞️ 1080p", callback_data=f"yt|video|1080|{token}"),
-    ]]
-    row = [InlineKeyboardButton("🎵 MP3", callback_data=f"yt|audio||{token}")]
-    if available_langs:
-        row.append(InlineKeyboardButton("💬 Subtitle", callback_data=f"yt|submenu||{token}"))
-    row.append(InlineKeyboardButton("❌ Cancel", callback_data="yt|cancel||"))
-    keyboard.append(row)
-
+    keyboard = [
+        [
+            InlineKeyboardButton("360p", callback_data=f"yt|video|360|{token}"),
+            InlineKeyboardButton("720p", callback_data=f"yt|video|720|{token}"),
+            InlineKeyboardButton("1080p", callback_data=f"yt|video|1080|{token}"),
+        ],
+        [
+            InlineKeyboardButton("MP3", callback_data=f"yt|audio||{token}"),
+            InlineKeyboardButton("Cancel", callback_data=f"yt|cancel||{token}"),
+        ]
+    ]
     await update.message.reply_text(
-        "Pilih format video/audio/subtitle yang ingin diunduh:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"Select format for:\n<b>{title}</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    parts = query.data.split("|")
-    if len(parts) != 3:
-        await query.edit_message_text("❌ Data tombol TikTok tidak valid.")
-        return
-
-    _, mode, short_id = parts
-    data = context.user_data.get(f"tt_{short_id}")
-    if not data:
-        await query.answer("Data tidak ditemukan atau sudah kedaluwarsa.", show_alert=True)
-        return
-    if not is_tiktok_owner(data, update.effective_user.id):
-        await query.answer("Tombol ini hanya bisa dipakai pengirim link.", show_alert=True)
-        return
-
-    title = data.get("title", "TikTok")
-    url = data.get("video_url") if mode == "video" else data.get("audio_url")
-    filename = None
-    status_msg = None
-    try:
-        ext = ".mp4" if mode == "video" else ".mp3"
-        status_msg = await update.callback_query.message.reply_text(f"⬇️ Mengunduh TikTok ({mode})...", reply_to_message_id=data["source_message_id"])
-        filename = await asyncio.to_thread(download_tiktok_file, url, ext)
-        size = os.path.getsize(filename)
-        if size > MAX_TELEGRAM_FILE_SIZE:
-            await _upload_media_to_drive(filename, title, status_msg)
-        else:
-            with open(filename, "rb") as media_file:
-                if mode == "audio":
-                    await context.bot.send_audio(chat_id=update.effective_user.id, audio=media_file, title=title)
-                else:
-                    await context.bot.send_video(chat_id=update.effective_user.id, video=media_file, caption=title)
-            await status_msg.delete()
-    except Exception as e:
-        logging.error("TikTok media error: %s", sanitize_error(e))
-        if status_msg:
-            await status_msg.delete()
-        await context.bot.send_message(chat_id=update.effective_user.id, text=f"❌ Gagal mengunduh: {sanitize_error(e)}")
-    finally:
-        if filename and os.path.exists(filename):
-            os.remove(filename)
-        context.user_data.pop(f"tt_{short_id}", None)
-        try:
-            if status_msg:
-                await status_msg.delete()
-        except Exception:
-            pass
 
 async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-
-    parts = query.data.split("|")
-    if len(parts) != 4:
-        await query.edit_message_text("❌ Data callback tidak valid.")
+    if not query:
         return
+
+    parts = (query.data or "").split("|")
+    if len(parts) != 4:
+        return await query.answer("Invalid request.", show_alert=True)
 
     _, mode, resolution, token = parts
+    session = context.bot_data.get(f"yt_{token}")
+    if not session:
+        return await query.answer("Session expired. Please send the link again.", show_alert=True)
+
+    # Command-issuer lock
+    owner_id = session.get("owner_id")
+    user_id = query.from_user.id if getattr(query, "from_user", None) else (update.effective_user.id if update.effective_user else None)
+    if owner_id and user_id and user_id != owner_id:
+        return await query.answer("This button belongs to the user who requested the link.", show_alert=True)
+
+    await query.answer()
     if mode == "cancel":
-        await query.edit_message_text("❌ Operasi dibatalkan.")
-        return
+        context.bot_data.pop(f"yt_{token}", None)
+        return await query.edit_message_text("Cancelled.")
 
-    url = context.bot_data.get(f"yt_{token}")
-    if not url:
-        await query.edit_message_text("❌ Link sudah kedaluwarsa. Kirim ulang link YouTube.")
-        return
+    context.bot_data.pop(f"yt_{token}", None)
+    url = session["url"]
+    title = session["title"]
 
-    if mode == "sub":
-        msg = await query.edit_message_text("⏳ Mengunduh subtitle...")
-        result = download_subtitle(url, lang=resolution or "id")
-        if result:
-            filepath, title = result
-            try:
-                with open(filepath, "rb") as f:
-                    await context.bot.send_document(
-                        chat_id=query.message.chat_id,
-                        document=InputFile(f, filename=os.path.basename(filepath)),
-                        caption=f"📄 Subtitle: {title}"
-                    )
-                await msg.delete()
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            except Exception as e:
-                await msg.edit_text(f"❌ Gagal kirim subtitle: {e}")
-        else:
-            await msg.edit_text("❌ Subtitle tidak tersedia atau gagal diunduh.")
-        return
+    job_id = token[:4]
+    add_job(job_id, _user_tag(update.effective_user), title)
+    status = await query.edit_message_text(f"Queued: {title}...")
 
-    if mode == "submenu":
-        try:
-            with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
-                info = ydl.extract_info(url, download=False)
-                subtitle_langs = list(info.get("subtitles", {}).keys())
-        except Exception as e:
-            logging.error(f"Gagal deteksi subtitle submenu: {e}")
-            subtitle_langs = []
-
-        preferred_langs = ["id", "en", "es"]
-        available_langs = [lang for lang in preferred_langs if lang in subtitle_langs]
-
-        if not available_langs:
-            await query.edit_message_text("❌ Subtitle tidak tersedia untuk video ini.")
-            return
-
-        subtitle_buttons = [
-            InlineKeyboardButton(f"{flag_for_lang(lang)} {lang.upper()}", callback_data=f"yt|sub|{lang}|{token}")
-            for lang in available_langs
-        ]
-
-        rows = [subtitle_buttons[i:i+3] for i in range(0, len(subtitle_buttons), 3)]
-        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="yt|cancel||")])
-
-        await query.edit_message_text("Pilih bahasa subtitle:", reply_markup=InlineKeyboardMarkup(rows))
-        return
-
+    filepath = None
     try:
-        msg = await query.edit_message_text("⏳ Mengunduh dari YouTube...", disable_web_page_preview=True)
-    except telegram.error.BadRequest:
-        msg = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="⏳ Mengunduh dari YouTube...",
-            disable_web_page_preview=True
-        )
+        sem = get_download_semaphore()
+        async with sem:
+            update_job(job_id, stage="Downloading")
+            await status.edit_text(f"Downloading: {title}...")
 
-    start_time = time.time()
-    result = await asyncio.to_thread(download_youtube, url, mode, resolution if resolution else None)
-    end_time = time.time()
-    duration = round(end_time - start_time)
-    m, s = divmod(duration, 60)
-    duration_str = f"{m}m{s}s" if m else f"{s}s"
+            last_edit = [0.0]
+            def _progress(pct):
+                update_job(job_id, progress=pct)
+                now = time.time()
+                if now - last_edit[0] > 4.0:
+                    last_edit[0] = now
+                    asyncio.create_task(status.edit_text(f"Downloading {title}: {pct}%"))
 
-    if not result:
-        await msg.edit_text("❌ Gagal unduh dari YouTube.")
-        return
+            result = await asyncio.to_thread(
+                download_youtube, url, mode=mode, resolution=resolution or None, on_progress=_progress
+            )
+            if not result:
+                return await status.edit_text("Download failed. Format may not be available.")
 
-    filepath, title = result
-    try:
-        size = os.path.getsize(filepath)
-        if size > MAX_TELEGRAM_FILE_SIZE:
-            link = await _upload_media_to_drive(filepath, title, msg)
-            if link:
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=f"✅ File tersimpan di Google Drive: {link}",
-                    disable_web_page_preview=True,
-                )
-        else:
-            with open(filepath, "rb") as media_file:
-                await msg.delete()
-                try:
+            filepath, final_title = result
+            size = os.path.getsize(filepath)
+
+            # Upload to Drive if file exceeds Telegram's 50 MB limit
+            if size > MAX_TELEGRAM_FILE_SIZE:
+                update_job(job_id, stage="Uploading to Drive")
+                await status.edit_text(f"File is {size / 1024**2:.1f} MB. Uploading to Google Drive...")
+                link = await asyncio.to_thread(upload_to_drive, filepath)
+                await status.edit_text(f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
+            else:
+                with open(filepath, "rb") as media_file:
+                    await status.delete()
                     if mode == "audio":
-                        await context.bot.send_audio(chat_id=query.message.chat_id, audio=media_file, title=title)
+                        await context.bot.send_audio(
+                            chat_id=query.message.chat_id,
+                            audio=InputFile(media_file, filename=os.path.basename(filepath)),
+                            title=final_title,
+                        )
                     else:
                         await context.bot.send_document(
                             chat_id=query.message.chat_id,
                             document=InputFile(media_file, filename=os.path.basename(filepath)),
-                            caption=title,
+                            caption=final_title,
                         )
-                    return
-                except telegram.error.TimedOut:
-                    link = await _upload_media_to_drive(filepath, title, msg)
-                    if link:
-                        await context.bot.send_message(
-                            chat_id=query.message.chat_id,
-                            text=f"✅ File tersimpan di Google Drive: {link}",
-                            disable_web_page_preview=True,
-                        )
-
     except Exception as e:
-        await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Gagal proses file: {sanitize_error(e)}")
+        logging.error("Processing error: %s", sanitize_error(e))
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Failed to process video.")
     finally:
-        if os.path.exists(filepath):
-            os.remove(filepath)
+        remove_job(job_id)
+        if filepath and os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+
 
 async def download_youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Pakai: /yt <link YouTube>")
-    url = " ".join(context.args).strip()
-    if not media_service_url(url, "youtube"):
-        return await update.message.reply_text("❌ Link YouTube tidak valid. Contoh: /yt https://youtu.be/...")
+    if not update.message or not context.args:
+        return await update.message.reply_text("Usage: /yt <YouTube URL>")
+    url = context.args[0].strip()
+    if not normalize_media_url(url, "youtube"):
+        return await update.message.reply_text("Invalid YouTube URL.")
     await offer_youtube_format(update, url, context)
 
 
 async def download_youtube_music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = " ".join(context.args).strip() if context.args else ""
-    normalized_url = media_service_url(url, "youtube")
-    if not normalized_url:
-        return await update.message.reply_text("Pakai: /ytm <link YouTube Music>")
-    if not (urlparse(normalized_url).hostname or "").lower().endswith("music.youtube.com"):
-        return await update.message.reply_text("❌ Link harus dari music.youtube.com. Contoh: /ytm https://music.youtube.com/watch?v=...")
+    if not update.message or not context.args:
+        return await update.message.reply_text("Usage: /ytm <YouTube Music URL>")
+    url = context.args[0].strip()
+    if not normalize_media_url(url, "youtube") or "music.youtube.com" not in url:
+        return await update.message.reply_text("URL must be from music.youtube.com.")
 
-    msg = await update.message.reply_text("🎵 Mengunduh lagu dari YouTube Music...")
-    result = await asyncio.to_thread(download_youtube, normalized_url, mode="audio", music=True)
-    if not result:
-        await msg.edit_text("❌ Gagal unduh lagu dari YouTube Music.")
-        return
-
-    filepath, title = result
+    status = await update.message.reply_text("Downloading audio...")
+    filepath = None
     try:
-        if not os.path.isfile(filepath):
-            raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
-        size = os.path.getsize(filepath)
-        if size > MAX_TELEGRAM_FILE_SIZE:
-            await _upload_media_to_drive(filepath, title, msg)
+        result = await asyncio.to_thread(download_youtube, url, mode="audio", music=True)
+        if not result:
+            return await status.edit_text("Failed to download track.")
+        filepath, title = result
+        if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
+            await status.edit_text("File exceeds 50 MB. Uploading to Google Drive...")
+            link = await asyncio.to_thread(upload_to_drive, filepath)
+            await status.edit_text(f"Saved to Google Drive:\n{link}")
         else:
-            with open(filepath, "rb") as media_file:
-                await msg.delete()
-                await update.message.reply_audio(
-                    audio=InputFile(media_file, filename=os.path.basename(filepath)),
-                    title=title,
-                )
-    except Exception as error:
-        await msg.edit_text(f"❌ Gagal kirim file: {sanitize_error(error)}")
+            with open(filepath, "rb") as f:
+                await status.delete()
+                await update.message.reply_audio(audio=InputFile(f, filename=os.path.basename(filepath)), title=title)
     finally:
-        if os.path.exists(filepath):
-            os.remove(filepath)
+        if filepath and os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
 
 
 async def download_instagram_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Pakai: /ig <link Instagram>")
-    url = " ".join(context.args).strip()
-    if not media_service_url(url, "instagram"):
-        return await update.message.reply_text("❌ Link Instagram tidak valid. Contoh: /ig https://www.instagram.com/reel/...")
-    await _download_instagram(update, url)
+    if not update.message or not context.args:
+        return await update.message.reply_text("Usage: /ig <Instagram URL>")
+    url = context.args[0].strip()
+    if not normalize_media_url(url, "instagram"):
+        return await update.message.reply_text("Invalid Instagram URL.")
 
-
-async def _download_instagram(update: Update, url: str):
-    msg = await update.message.reply_text("🔍 Mengunduh media Instagram...")
+    status = await update.message.reply_text("Downloading Instagram media...")
     filepath = None
     try:
         os.makedirs("ig-dump", exist_ok=True)
-        options = {
+        outtmpl = f"ig-dump/{uuid.uuid4().hex[:6]}_%(id)s.%(ext)s"
+        opts = {
             "quiet": True,
             "noplaylist": True,
-            "restrictfilenames": True,
-            "outtmpl": f"ig-dump/{uuid.uuid4().hex}_%(id)s_%(title).80s.%(ext)s",
+            "outtmpl": outtmpl,
             "merge_output_format": "mp4",
         }
 
-        def download():
-            with yt_dlp.YoutubeDL(options) as ydl:
+        def _fetch():
+            import yt_dlp
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                candidate = info.get("filepath") or ydl.prepare_filename(info)
-                if not os.path.exists(candidate) and not candidate.endswith(".mp4"):
-                    mp4_candidate = os.path.splitext(candidate)[0] + ".mp4"
-                    if os.path.exists(mp4_candidate):
-                        candidate = mp4_candidate
-                return candidate, info.get("title", "Instagram")
+                return ydl.prepare_filename(info), info.get("title", "Instagram")
 
-        filepath, title = await asyncio.to_thread(download)
+        filepath, title = await asyncio.to_thread(_fetch)
         if not os.path.isfile(filepath):
-            raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
+            filepath = os.path.splitext(filepath)[0] + ".mp4"
+
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
-            await _upload_media_to_drive(filepath, title, msg)
+            link = await asyncio.to_thread(upload_to_drive, filepath)
+            await status.edit_text(f"Saved to Google Drive:\n{link}")
         else:
-            with open(filepath, "rb") as media_file:
-                await msg.delete()
-                await update.message.reply_video(
-                    video=InputFile(media_file, filename=os.path.basename(filepath)),
-                    caption=title,
-                )
-    except Exception as error:
-        logging.error("Instagram download error: %s", sanitize_error(error))
-        await msg.edit_text(f"❌ Gagal unduh IG: {sanitize_error(error)}")
+            with open(filepath, "rb") as f:
+                await status.delete()
+                await update.message.reply_video(video=InputFile(f, filename=os.path.basename(filepath)), caption=title)
+    except Exception as e:
+        logging.error("Instagram error: %s", sanitize_error(e))
+        await status.edit_text("Failed to download Instagram media.")
     finally:
         if filepath and os.path.exists(filepath):
-            os.remove(filepath)
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
 
 
-def media_service_url(url: str, platform: str):
-    return normalize_media_url(url, platform)
+async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+
+    parts = (query.data or "").split("|")
+    if len(parts) != 3:
+        return await query.answer("Invalid payload.", show_alert=True)
+
+    _, mode, short_id = parts
+    data = context.user_data.get(f"tt_{short_id}")
+    user_id = query.from_user.id if getattr(query, "from_user", None) else (update.effective_user.id if update.effective_user else None)
+    if not data or not is_tiktok_owner(data, user_id):
+        return await query.answer("This button belongs to the requester.", show_alert=True)
+
+    await query.answer()
+    url = data.get("video_url") if mode == "video" else data.get("audio_url")
+    ext = ".mp4" if mode == "video" else ".mp3"
+    status = await query.message.reply_text(f"Downloading TikTok {mode}...")
+    filename = None
+    try:
+        filename = await asyncio.to_thread(download_tiktok_file, url, ext)
+        if os.path.getsize(filename) > MAX_TELEGRAM_FILE_SIZE:
+            link = await asyncio.to_thread(upload_to_drive, filename)
+            await status.edit_text(f"Saved to Google Drive:\n{link}")
+        else:
+            with open(filename, "rb") as f:
+                if mode == "audio":
+                    await context.bot.send_audio(chat_id=user_id, audio=f, title=data.get("title"))
+                else:
+                    await context.bot.send_video(chat_id=user_id, video=f, caption=data.get("title"))
+            await status.delete()
+    except Exception as e:
+        logging.error("TikTok error: %s", sanitize_error(e))
+        await status.edit_text("Failed to download TikTok.")
+    finally:
+        if filename and os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
+        context.user_data.pop(f"tt_{short_id}", None)
+
+
+async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.reply_to_message or not msg.reply_to_message.video:
+        if msg:
+            await msg.reply_text("Reply to a video with /convert to extract MP3.")
+        return
+
+    video = msg.reply_to_message.video
+    if getattr(video, "file_size", None) and video.file_size > MAX_TELEGRAM_DOWNLOAD_SIZE:
+        return await msg.reply_text("Video exceeds Telegram's 20 MB bot limit.")
+
+    os.makedirs("converted", exist_ok=True)
+    run_id = uuid.uuid4().hex[:6]
+    in_file = f"converted/{run_id}_in.mp4"
+    out_file = f"converted/{run_id}_audio.mp3"
+    status = await msg.reply_text("Converting video to MP3...")
+
+    try:
+        tg_file = await video.get_file()
+        await tg_file.download_to_drive(in_file)
+
+        import subprocess
+        await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-y", "-i", in_file, out_file],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+
+        with open(out_file, "rb") as f:
+            await status.delete()
+            await msg.reply_audio(audio=InputFile(f, filename="audio.mp3"))
+    except Exception as e:
+        logging.error("Convert error: %s", sanitize_error(e))
+        await status.edit_text("Conversion failed.")
+    finally:
+        for p in (in_file, out_file):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
     user = update.effective_user
 
-    # Each update is handled independently; no global/user cooldown.
+    yt_url = normalize_media_url(text, "youtube")
+    if yt_url:
+        if (urlparse(yt_url).hostname or "").lower().endswith("music.youtube.com"):
+            return await asyncio.to_thread(download_youtube, yt_url, mode="audio", music=True)
+        return await offer_youtube_format(update, yt_url, context)
 
-    # Log all incoming http/https links
-    if text.startswith("http"):
-        logging.info(f"[Link] Dari @{user.username or '-'} ({user.first_name} / {user.id}): {text}")
+    ig_url = normalize_media_url(text, "instagram")
+    if ig_url:
+        context.args = [ig_url]
+        return await download_instagram_command(update, context)
 
-    # YouTube and YouTube Music links
-    youtube_url = media_service_url(text, "youtube")
-    if youtube_url:
-        logging.info(f"[YouTube] Memproses: {youtube_url}")
-
-        if (urlparse(youtube_url).hostname or "").lower().endswith("music.youtube.com"):
-            msg = await update.message.reply_text("🎵 Mengunduh lagu dari YouTube Music...")
-            result = await asyncio.to_thread(download_youtube, youtube_url, mode="audio", music=True)
-            if result:
-                filepath, title = result
-                try:
-                    if not os.path.isfile(filepath):
-                        raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
-                    size = os.path.getsize(filepath)
-                    if size > MAX_TELEGRAM_FILE_SIZE:
-                        await _upload_media_to_drive(filepath, title, msg)
-                    else:
-                        with open(filepath, "rb") as f:
-                            await msg.delete()
-                            await update.message.reply_audio(audio=InputFile(f, filename=os.path.basename(filepath)), title=title)
-                except Exception as error:
-                    await msg.edit_text(f"❌ Gagal kirim file: {sanitize_error(error)}")
-                finally:
-                    if os.path.exists(filepath):
-                        os.remove(filepath)
-            else:
-                await msg.edit_text("❌ Gagal unduh lagu dari YouTube Music.")
-        else:
-            await offer_youtube_format(update, youtube_url, context)
-        return
-
-    elif "tiktok.com" in text:
-        logging.info(f"[TikTok] Memproses: {text}")
+    if "tiktok.com" in text:
         msg = await update.message.reply_text("🔍 Mendeteksi link TikTok...")
         try:
             r = requests.get("https://tikwm.com/api/", params={"url": text})
             res = r.json()
             data = res.get("data")
             if res.get("code") == 0 and data:
-                from telegram import InputMediaPhoto
-
                 if data.get("images"):
-                    await msg.edit_text("📸 Deteksi slide foto, mengirim...")
-
-                    # Group photos into a media group
                     media_group = [
-                        InputMediaPhoto(media=url) for url in data["images"][:10]
+                        InputMediaPhoto(media=img_url) for img_url in data["images"][:10]
                     ]
-
                     try:
                         await context.bot.send_media_group(chat_id=user.id, media=media_group)
                         await update.message.reply_text(
@@ -471,13 +365,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             reply_to_message_id=update.message.message_id,
                         )
                     except Exception as e:
-                        logging.error(f"Gagal kirim album TikTok secara privat: {e}")
+                        logging.error("Failed to send TikTok album privately: %s", sanitize_error(e))
                         await msg.edit_text("❌ Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
                     else:
                         await msg.delete()
                     return
 
-                # Save metadata to context
                 short_id = str(uuid.uuid4())[:8]
                 context.user_data[f"tt_{short_id}"] = {
                     "video_url": data.get("play"),
@@ -488,7 +381,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "source_message_id": update.message.message_id,
                 }
 
-                logging.info(f"[TikTok] Menyediakan pilihan privat untuk user {user.id}")
                 try:
                     await context.bot.send_message(
                         chat_id=user.id,
@@ -500,22 +392,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ]
                         ]),
                     )
-                    await update.message.reply_text("✅ Pilihan dikirim lewat chat pribadi Anda. Unduhan juga akan dikirim ke chat pribadi.", reply_to_message_id=update.message.message_id)
+                    await update.message.reply_text(
+                        "✅ Pilihan dikirim lewat chat pribadi Anda. Unduhan juga akan dikirim ke chat pribadi.",
+                        reply_to_message_id=update.message.message_id,
+                    )
                 except Exception as e:
-                    logging.info(f"TikTok private delivery unavailable: {e}")
+                    logging.info("TikTok private delivery unavailable: %s", sanitize_error(e))
                     context.user_data.pop(f"tt_{short_id}", None)
                     await msg.edit_text("❌ Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
                 return
 
             await msg.edit_text("❌ Gagal unduh TikTok: Respon tidak valid.")
         except Exception as e:
-            logging.error(f"TikTok error: {e}")
+            logging.error("TikTok error: %s", sanitize_error(e))
             await msg.edit_text(f"❌ Gagal unduh TikTok: {e}")
-
-    instagram_url = media_service_url(text, "instagram")
-    if instagram_url:
-        logging.info(f"[Instagram] Memproses: {instagram_url}")
-        await _download_instagram(update, instagram_url)
         return
 
-    await update.message.reply_text("❌ Link tidak dikenali. Kirim link dari YouTube, TikTok, Instagram.")
+    await update.message.reply_text("Send a YouTube, TikTok, or Instagram link.")

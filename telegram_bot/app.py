@@ -23,6 +23,7 @@ def build_application():
     app.add_handler(CommandHandler('yt', media.download_youtube_command))
     app.add_handler(CommandHandler('ytm', media.download_youtube_music_command))
     app.add_handler(CommandHandler('ig', media.download_instagram_command))
+    app.add_handler(CommandHandler('status', media.active_downloads_status))
     app.add_handler(CallbackQueryHandler(media.yt_callback_handler, pattern='^yt\\|'))
     app.add_handler(CommandHandler('id', general.get_id))
     app.add_handler(CommandHandler('github', general.github_command))
