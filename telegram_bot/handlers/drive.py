@@ -46,6 +46,29 @@ def _guess_extension(mime_type: str | None, fallback_ext: str) -> str:
     return fallback_ext
 
 
+_DIAGNOSTIC_ATTRS = (
+    "document",
+    "video",
+    "audio",
+    "animation",
+    "voice",
+    "video_note",
+    "photo",
+    "sticker",
+    "story",
+    "paid_media",
+    "link_preview_options",
+    "forum_topic_created",
+)
+
+
+def _present_attrs(obj) -> str:
+    if obj is None:
+        return "none"
+    present = [attr for attr in _DIAGNOSTIC_ATTRS if getattr(obj, attr, None)]
+    return ",".join(present) or type(obj).__name__
+
+
 def _extract_upload_media(message) -> tuple[str, str, int | None] | None:
     """Extract (file_id, file_name, file_size) from a Telegram media attachment."""
     if message is None:
@@ -168,9 +191,24 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Access denied.")
         return
 
-    # Inspect replied message first (skipping topic service messages), then captioned media on current message.
-    media_info = _extract_upload_media(getattr(msg, "reply_to_message", None)) or _extract_upload_media(msg)
+    reply = getattr(msg, "reply_to_message", None)
+    external_reply = getattr(msg, "external_reply", None)
+    # Inspect in-chat reply, cross-chat/topic external_reply, then captioned media on current message.
+    media_info = (
+        _extract_upload_media(reply)
+        or _extract_upload_media(external_reply)
+        or _extract_upload_media(msg)
+    )
     if not media_info:
+        logging.warning(
+            "[UPLOAD] %s missed media: chat=%s msg=[%s] reply=[%s] external_reply=[%s] has_caption=%s",
+            get_user_info(user),
+            getattr(msg, "chat_id", None),
+            _present_attrs(msg),
+            _present_attrs(reply),
+            _present_attrs(external_reply),
+            bool(getattr(msg, "caption", None)),
+        )
         return await msg.reply_text(
             "Reply to any file, photo, video, audio, or voice message with /upload (or send media with /upload as the caption)."
         )

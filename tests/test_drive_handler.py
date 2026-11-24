@@ -96,6 +96,42 @@ class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
             bot.get_file.assert_awaited_once_with(expected_id)
             self.assertEqual(up.call_args[0][2], expected_name)
 
+    async def test_upload_supports_external_reply_and_logs_warning_when_media_missing(self):
+        from types import SimpleNamespace
+
+        ext_msg = SimpleNamespace(
+            reply_to_message=None,
+            external_reply=SimpleNamespace(
+                document=SimpleNamespace(file_id="ext-1", file_name="Clairo.jpg", file_unique_id="e1", file_size=2048)
+            ),
+            reply_text=AsyncMock(return_value=SimpleNamespace(edit_text=AsyncMock())),
+        )
+        ext_update = SimpleNamespace(effective_message=ext_msg, effective_user=SimpleNamespace(id=42))
+        tg_file = SimpleNamespace(download_to_drive=AsyncMock())
+        bot = SimpleNamespace(get_file=AsyncMock(return_value=tg_file))
+        context = SimpleNamespace(bot=bot)
+        with patch.object(drive_handler, "DRIVE_ALLOWED_USER_IDS", frozenset({42})), \
+             patch.object(drive_handler, "upload_to_drive", return_value="https://drive.google.com/file/d/ext/view") as up, \
+             patch.object(drive_handler, "get_user_info", return_value="test user"):
+            await drive_handler.upload(ext_update, context)
+        bot.get_file.assert_awaited_once_with("ext-1")
+        self.assertEqual(up.call_args[0][2], "Clairo.jpg")
+
+        miss_msg = SimpleNamespace(
+            chat_id=-1001,
+            reply_to_message=SimpleNamespace(story=SimpleNamespace(id=9)),
+            external_reply=None,
+            caption=None,
+            reply_text=AsyncMock(),
+        )
+        miss_update = SimpleNamespace(effective_message=miss_msg, effective_user=SimpleNamespace(id=42))
+        with patch.object(drive_handler, "DRIVE_ALLOWED_USER_IDS", frozenset({42})), \
+             patch.object(drive_handler, "get_user_info", return_value="test user"), \
+             self.assertLogs(level="WARNING") as logs:
+            await drive_handler.upload(miss_update, context)
+        miss_msg.reply_text.assert_awaited_once()
+        self.assertTrue(any("[UPLOAD]" in line and "reply=[story]" in line for line in logs.output))
+
 
 if __name__ == "__main__":
     unittest.main()
