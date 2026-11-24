@@ -145,7 +145,8 @@ class DriveServiceTests(unittest.TestCase):
                  patch.object(drive, "build", return_value="service"):
                 self.assertEqual(drive.get_drive_service(), "service")
             self.assertEqual(json.loads(token_path.read_text(encoding="utf-8")), {"token": "new-token"})
-            self.assertEqual(stat.S_IMODE(token_path.stat().st_mode), 0o600)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(token_path.stat().st_mode), 0o600)
             self.assertEqual(list(Path(token_dir).glob("*.tmp")), [])
 
     def test_missing_upload_path_fails_before_drive_api_access(self):
