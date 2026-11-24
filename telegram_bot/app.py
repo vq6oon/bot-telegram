@@ -37,7 +37,6 @@ def build_application():
     app.add_handler(CallbackQueryHandler(general.start_callback_handler, pattern="^back_to_main$"))
     app.add_handler(CommandHandler("lapor", reports.lapor))
     app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, reports.handle_laporan_balasan))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, media.handle_message))
     app.add_handler(CommandHandler("rules", general.rules))
     app.add_handler(CommandHandler("shorten", general.shorten))
     app.add_handler(CallbackQueryHandler(media.tiktok_callback_handler, pattern="^tt\\|"))
@@ -56,6 +55,13 @@ def build_application():
     app.add_handler(CommandHandler("cleardrive", drive.clear_drive))
     app.add_handler(CommandHandler("checkdrive", drive.check_drive))
     app.add_handler(CommandHandler("upload", drive.upload))
+    if hasattr(filters, "CaptionRegex"):
+        app.add_handler(
+            MessageHandler(
+                filters.CaptionRegex(r"^/upload(?:@[A-Za-z0-9_]+)?(?:\s|$)"),
+                drive.upload,
+            )
+        )
     app.add_handler(
         CallbackQueryHandler(
             drive.clear_drive_callback,
