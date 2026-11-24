@@ -1,6 +1,7 @@
 """Media download services with JS runtimes, scoped cookies, and resilient yt-dlp formats."""
 import logging
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -151,6 +152,37 @@ async def download_file_with_progress(context, url, filename, chat_id) -> bool:
         logging.error("Direct download failed: %s", sanitize_error(e))
         await msg.edit_text("Download failed.")
         return False
+
+
+_INVALID_FILENAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def format_youtube_filename(
+    title: str,
+    mode: str = "video",
+    resolution: str | None = None,
+    ext: str | None = None,
+) -> str:
+    """Build a display filename such as 'Video Title (1080p).mp4'."""
+    default_ext = "mp3" if mode == "audio" else "mp4"
+    clean_ext = (ext or default_ext).lstrip(".") or default_ext
+
+    cleaned = _INVALID_FILENAME_RE.sub(" ", str(title or ""))
+    cleaned = " ".join(cleaned.split()).strip(" .")
+    if len(cleaned) > 120:
+        cleaned = cleaned[:120].rstrip(" .")
+    if not cleaned:
+        cleaned = "YouTube Audio" if mode == "audio" else "YouTube Video"
+
+    if mode != "audio":
+        raw_res = str(resolution or "").strip()
+        if raw_res:
+            res_label = f"{raw_res}p" if raw_res.isdigit() else raw_res
+        else:
+            res_label = "best"
+        return f"{cleaned} ({res_label}).{clean_ext}"
+
+    return f"{cleaned}.{clean_ext}"
 
 
 def _build_video_format_selector(resolution: str | None) -> tuple[str, list[str]]:

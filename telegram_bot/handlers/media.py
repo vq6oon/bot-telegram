@@ -29,7 +29,12 @@ from ..services.job_tracker import (
     snapshot,
     update_job,
 )
-from ..services.media import download_youtube, extract_youtube_info, normalize_media_url
+from ..services.media import (
+    download_youtube,
+    extract_youtube_info,
+    format_youtube_filename,
+    normalize_media_url,
+)
 from ..services.subtitles import download_subtitle, flag_for_lang
 from ..services.tiktok import download_tiktok_file, is_tiktok_owner
 
@@ -79,6 +84,7 @@ async def _upload_to_drive_guarded(
     *,
     job_id: str | None = None,
     app_properties: dict[str, str] | None = None,
+    custom_name: str | None = None,
 ) -> str:
     """Acquire shared Drive upload semaphore and stream chunked upload with progress updates."""
     size_mb = os.path.getsize(filepath) / (1024 * 1024)
@@ -115,7 +121,7 @@ async def _upload_to_drive_guarded(
             upload_to_drive,
             filepath,
             target_folder,
-            None,
+            custom_name,
             _on_upload_progress,
             app_properties,
         )
@@ -130,6 +136,7 @@ async def _upload_and_notify_drive(
     *,
     job_id: str | None = None,
     app_properties: dict[str, str] | None = None,
+    custom_name: str | None = None,
 ) -> str:
     link = await _upload_to_drive_guarded(
         filepath,
@@ -137,6 +144,7 @@ async def _upload_and_notify_drive(
         title,
         job_id=job_id,
         app_properties=app_properties,
+        custom_name=custom_name,
     )
     await _safe_edit_text(
         status_msg, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
@@ -385,6 +393,14 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             filepath, final_title = result
 
+        ext = os.path.splitext(filepath)[1].lstrip(".") or None
+        display_name = format_youtube_filename(
+            final_title,
+            mode=mode,
+            resolution=resolution or None,
+            ext=ext,
+        )
+
         size = os.path.getsize(filepath)
         if size > MAX_TELEGRAM_FILE_SIZE:
             await _upload_and_notify_drive(
@@ -395,6 +411,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"chat {query.message.chat_id}",
                 job_id=job_id,
                 app_properties=yt_props,
+                custom_name=display_name,
             )
         else:
             try:
@@ -403,13 +420,13 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     if mode == "audio":
                         await context.bot.send_audio(
                             chat_id=query.message.chat_id,
-                            audio=InputFile(media_file, filename=os.path.basename(filepath)),
+                            audio=InputFile(media_file, filename=display_name),
                             title=final_title,
                         )
                     else:
                         await context.bot.send_document(
                             chat_id=query.message.chat_id,
-                            document=InputFile(media_file, filename=os.path.basename(filepath)),
+                            document=InputFile(media_file, filename=display_name),
                             caption=final_title,
                         )
                 logging.info("[YT] Sent %s to chat %s: %s", mode, query.message.chat_id, final_title)
@@ -430,6 +447,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"chat {query.message.chat_id}",
                     job_id=job_id,
                     app_properties=yt_props,
+                    custom_name=display_name,
                 )
     except Exception as e:
         logging.error("Processing error: %s", sanitize_error(e))
@@ -473,13 +491,17 @@ async def download_youtube_music_command(update: Update, context: ContextTypes.D
         if not result:
             return await status.edit_text("Failed to download track.")
         filepath, title = result
+        ext = os.path.splitext(filepath)[1].lstrip(".") or "mp3"
+        display_name = format_youtube_filename(title, mode="audio", ext=ext)
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
-            await _upload_and_notify_drive(filepath, status, title, "YTM", f"chat {chat_id}")
+            await _upload_and_notify_drive(
+                filepath, status, title, "YTM", f"chat {chat_id}", custom_name=display_name
+            )
         else:
             with open(filepath, "rb") as f:
                 await status.delete()
                 await update.message.reply_audio(
-                    audio=InputFile(f, filename=os.path.basename(filepath)), title=title
+                    audio=InputFile(f, filename=display_name), title=title
                 )
             logging.info("[YTM] Sent track to chat %s: %s", chat_id, title)
     except Exception as e:

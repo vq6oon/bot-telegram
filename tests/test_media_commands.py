@@ -115,6 +115,95 @@ class MediaCommandTests(unittest.TestCase):
         self.assertIn("yt", commands)
         self.assertIn("ig", commands)
 
+    def test_format_youtube_filename_matches_title_resolution_template(self):
+        self.assertEqual(
+            media_service.format_youtube_filename("Roblox: Potato/Phone?", mode="video", resolution="1080"),
+            "Roblox Potato Phone (1080p).mp4",
+        )
+        self.assertEqual(
+            media_service.format_youtube_filename("Clip Name", mode="video", resolution=None),
+            "Clip Name (best).mp4",
+        )
+        self.assertEqual(
+            media_service.format_youtube_filename("Artist - Track", mode="audio"),
+            "Artist - Track.mp3",
+        )
+
+    def test_yt_callback_uses_formatted_filename_for_telegram_and_drive(self):
+        import tempfile
+        from telegram_bot.handlers import media
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(b"video-bytes")
+            temp_path = tmp.name
+
+        try:
+            query = SimpleNamespace(
+                data="yt|video|1080|tok1",
+                from_user=SimpleNamespace(id=42, username="tester", first_name="Tester"),
+                message=SimpleNamespace(chat_id=99),
+                answer=AsyncMock(),
+                edit_message_text=AsyncMock(return_value=SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())),
+            )
+            update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
+            bot = SimpleNamespace(send_document=AsyncMock(), send_message=AsyncMock())
+            context = SimpleNamespace(
+                bot=bot,
+                bot_data={
+                    "yt_tok1": {
+                        "url": "https://youtu.be/abc123",
+                        "owner_id": 42,
+                        "title": "Cool: Video?",
+                        "video_id": "abc123",
+                    }
+                },
+            )
+            with patch.object(media, "find_cached_youtube_file", return_value=None), \
+                 patch.object(media, "download_youtube", return_value=(temp_path, "Cool: Video?")), \
+                 patch.object(media, "MAX_TELEGRAM_FILE_SIZE", 1024 * 1024):
+                asyncio.run(media.yt_callback_handler(update, context))
+
+            sent_doc = bot.send_document.call_args.kwargs["document"]
+            self.assertEqual(sent_doc.filename, "Cool Video (1080p).mp4")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(b"big-video-bytes")
+            temp_path = tmp.name
+
+        try:
+            query = SimpleNamespace(
+                data="yt|video|720|tok2",
+                from_user=SimpleNamespace(id=42, username="tester", first_name="Tester"),
+                message=SimpleNamespace(chat_id=99),
+                answer=AsyncMock(),
+                edit_message_text=AsyncMock(return_value=SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())),
+            )
+            update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
+            context = SimpleNamespace(
+                bot=SimpleNamespace(send_message=AsyncMock()),
+                bot_data={
+                    "yt_tok2": {
+                        "url": "https://youtu.be/abc123",
+                        "owner_id": 42,
+                        "title": "Big/Clip",
+                        "video_id": "abc123",
+                    }
+                },
+            )
+            with patch.object(media, "find_cached_youtube_file", return_value=None), \
+                 patch.object(media, "download_youtube", return_value=(temp_path, "Big/Clip")), \
+                 patch.object(media, "MAX_TELEGRAM_FILE_SIZE", 1), \
+                 patch.object(media, "upload_to_drive", return_value="https://drive.google.com/file/d/x/view") as up:
+                asyncio.run(media.yt_callback_handler(update, context))
+
+            self.assertEqual(up.call_args[0][2], "Big Clip (720p).mp4")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
 
 if __name__ == "__main__":
     unittest.main()
