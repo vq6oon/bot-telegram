@@ -1,76 +1,61 @@
-"""Configuration and local env loading."""
+"""Configuration loader for environment variables."""
 import os
 from pathlib import Path
 
 
-def _load_local_env():
-    path = Path(__file__).resolve().parents[1] / ".env"
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
+def _load_env():
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    if not env_file.is_file():
         return
-    for line in lines:
+    for line in env_file.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+        key, val = line.split("=", 1)
+        os.environ.setdefault(key.strip(), val.strip().strip("\"'"))
 
 
-def _parse_int_env(key: str, default: int) -> int:
-    raw = os.environ.get(key, "").strip()
-    if not raw:
-        return default
+def _int_env(key: str, default: int) -> int:
     try:
-        return int(raw)
+        return int(os.environ.get(key, "").strip())
     except ValueError:
         return default
 
 
-def _parse_float_env(key: str, default: float) -> float:
-    raw = os.environ.get(key, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def _parse_id_whitelist(raw: str, owner_id: int) -> frozenset[int]:
-    """Parse comma-separated Telegram user IDs; always include valid OWNER_ID."""
-    allowed: set[int] = set()
-    if owner_id > 0:
-        allowed.add(owner_id)
+def _whitelist(raw: str, owner_id: int) -> frozenset[int]:
+    ids = {owner_id} if owner_id > 0 else set()
     for item in raw.split(","):
-        token = item.strip()
-        if not token:
-            continue
         try:
-            uid = int(token)
-            if uid > 0:
-                allowed.add(uid)
+            val = int(item.strip())
+            if val > 0:
+                ids.add(val)
         except ValueError:
             continue
-    return frozenset(allowed)
+    return frozenset(ids)
 
 
-_load_local_env()
+_load_env()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 COOLDOWN_SECONDS = 30
-
-MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
-DRIVE_FOLDER_NAME = os.environ.get("DRIVE_FOLDER_NAME", "Bot-Uploads").strip() or "Bot-Uploads"
-OWNER_ID = _parse_int_env("OWNER_ID", 0)
+OWNER_ID = _int_env("OWNER_ID", 0)
 GITHUB_LINK = os.environ.get("GITHUB_LINK", "")
-DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
-GROUP_LAPOR_ID = _parse_int_env("GROUP_LAPOR_ID", 0)
+GROUP_LAPOR_ID = _int_env("GROUP_LAPOR_ID", 0)
 
-# Security & Concurrency settings for Google Drive
-DRIVE_ALLOWED_USER_IDS = _parse_id_whitelist(
-    os.environ.get("DRIVE_ALLOWED_USER_IDS", ""), OWNER_ID
-)
-DRIVE_CLEANUP_THRESHOLD_GB = max(1.0, _parse_float_env("DRIVE_CLEANUP_THRESHOLD_GB", 14.0))
+# Telegram limits
+MAX_TELEGRAM_DOWNLOAD_SIZE = 20 * 1024 * 1024  # 20 MB getFile limit
+MAX_TELEGRAM_BOT_DOWNLOAD_SIZE = 20 * 1024 * 1024
+MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024       # 50 MB bot send limit
+
+# Google Drive
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
+DRIVE_FOLDER_NAME = os.environ.get("DRIVE_FOLDER_NAME", "Bot-Uploads").strip() or "Bot-Uploads"
+DRIVE_ALLOWED_USER_IDS = _whitelist(os.environ.get("DRIVE_ALLOWED_USER_IDS", ""), OWNER_ID)
+DRIVE_CLEANUP_THRESHOLD_GB = max(1.0, float(os.environ.get("DRIVE_CLEANUP_THRESHOLD_GB", "14.0") or 14.0))
 DRIVE_CLEANUP_THRESHOLD_BYTES = int(DRIVE_CLEANUP_THRESHOLD_GB * (1024**3))
-DRIVE_MAX_CONCURRENT_UPLOADS = max(1, _parse_int_env("DRIVE_MAX_CONCURRENT_UPLOADS", 2))
+DRIVE_MAX_CONCURRENT_UPLOADS = max(1, _int_env("DRIVE_MAX_CONCURRENT_UPLOADS", 2))
+DRIVE_UPLOAD_CHUNK_BYTES = max(1, _int_env("DRIVE_UPLOAD_CHUNK_SIZE_MB", 8)) * 1024 * 1024
+
+# Media downloads
+MAX_CONCURRENT_DOWNLOADS = max(1, _int_env("MAX_CONCURRENT_DOWNLOADS", 3))
+DOWNLOAD_RATELIMIT_BYTES = _int_env("DOWNLOAD_RATELIMIT_KBPS", 0) * 1024
