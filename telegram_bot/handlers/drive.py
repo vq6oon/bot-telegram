@@ -201,23 +201,31 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
 
-    tmp_path = None
     try:
         async with _upload_semaphore:
             tg_file = await context.bot.get_file(file_id)
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=os.path.dirname(os.path.abspath(__file__)),
+                    prefix="telegram-upload-",
+                    suffix=os.path.splitext(file_name)[1],
+                    delete=False,
+                ) as temp:
+                    temp_path = temp.name
 
-            # Close temp file handle before download on Windows
-            with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                tmp_path = tmp.name
-
-            await tg_file.download_to_drive(tmp_path)
-
-            await msg.edit_text(
-                f"☁️ Mengunggah <code>{safe_file_name}</code> ke Google Drive...",
-                parse_mode=ParseMode.HTML,
-            )
-
-            link = await asyncio.to_thread(upload_to_drive, tmp_path, DRIVE_FOLDER_ID, file_name)
+                await tg_file.download_to_drive(temp_path)
+                await msg.edit_text(
+                    f"☁️ Mengunggah <code>{safe_file_name}</code> ke Google Drive...",
+                    parse_mode=ParseMode.HTML,
+                )
+                link = await asyncio.to_thread(upload_to_drive, temp_path, DRIVE_FOLDER_ID, file_name)
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError as cleanup_err:
+                        logging.warning("Failed to remove temporary file: %s", sanitize_error(cleanup_err))
 
         logging.info("[UPLOAD] %s uploaded: %s", get_user_info(user), file_name)
         await msg.edit_text(
@@ -236,9 +244,3 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error("Failed to upload to Drive: %s", sanitize_error(e))
         await msg.edit_text("❌ Gagal mengunggah file ke Google Drive. Silakan coba lagi.")
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError as cleanup_err:
-                logging.warning("Failed to remove temporary file: %s", sanitize_error(cleanup_err))

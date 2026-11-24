@@ -1,21 +1,45 @@
 import asyncio
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-from telegram.ext import ContextTypes
-import os
-import requests
-import yt_dlp
+import html
 import logging
-import telegram
 import mimetypes
-import time
+import os
 import subprocess
+import time
 import uuid
 from urllib.parse import urlparse
-from ..services.drive import get_drive_usage, upload_to_drive
+
+import requests
+import telegram
+import yt_dlp
+from telegram import InputFile, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram.ext import ContextTypes
+
+from ..services.drive import get_drive_usage, upload_to_drive, sanitize_error
 from ..services.media import download_file_with_progress, download_youtube, normalize_media_url
 from ..services.subtitles import download_subtitle, flag_for_lang
 from ..services.tiktok import download_tiktok_file, is_tiktok_owner
 from ..config import MAX_TELEGRAM_FILE_SIZE
+
+async def _upload_media_to_drive(file_path: str, title: str, status_msg):
+    """Upload media without blocking Telegram's async event loop."""
+    try:
+        safe_title = html.escape(title)
+        await status_msg.edit_text(
+            f"⏳ Mengunggah <code>{safe_title}</code> ke Google Drive...",
+            parse_mode=telegram.constants.ParseMode.HTML,
+        )
+        link = await asyncio.to_thread(upload_to_drive, file_path)
+        space = await asyncio.to_thread(get_drive_usage)
+        await status_msg.edit_text(
+            f"✅ File tersimpan di Google Drive:\n{link}\n\n💾 {html.escape(space)}",
+            disable_web_page_preview=True,
+        )
+        return link
+    except Exception as error:
+        logging.error("Drive media upload failed: %s", sanitize_error(error))
+        await status_msg.edit_text("❌ Gagal mengunggah file ke Google Drive. Silakan coba lagi.")
+        return None
+
 
 async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -57,8 +81,7 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if os.path.getsize(output_path) > MAX_TELEGRAM_FILE_SIZE:
             await status_msg.edit_text("📤 File besar, mengunggah ke Google Drive...")
-            link = upload_to_drive(output_path)
-            await status_msg.edit_text(f"✅ Selesai! Link:\n{link}")
+            await _upload_media_to_drive(output_path, new_name, status_msg)
         else:
             with open(output_path, "rb") as f:
                 await status_msg.delete()
@@ -66,9 +89,9 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         try:
-            await status_msg.edit_text(f"❌ Gagal konversi: {e}")
-        except:
-            await msg.reply_text(f"❌ Gagal konversi: {e}")
+            await status_msg.edit_text(f"❌ Gagal konversi: {sanitize_error(e)}")
+        except Exception:
+            await msg.reply_text(f"❌ Gagal konversi: {sanitize_error(e)}")
     finally:
         for path in [input_path, output_path]:
             if os.path.exists(path):
@@ -133,10 +156,7 @@ async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         filename = await asyncio.to_thread(download_tiktok_file, url, ext)
         size = os.path.getsize(filename)
         if size > MAX_TELEGRAM_FILE_SIZE:
-            await status_msg.edit_text("⏳ File besar, mengunggah ke Google Drive...")
-            link = upload_to_drive(filename)
-            space = get_drive_usage()
-            await context.bot.send_message(chat_id=update.effective_user.id, text=f"📁 {title}\n🔗 {link}\n💾 {space}")
+            await _upload_media_to_drive(filename, title, status_msg)
         else:
             with open(filename, "rb") as media_file:
                 if mode == "audio":
@@ -145,10 +165,10 @@ async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     await context.bot.send_video(chat_id=update.effective_user.id, video=media_file, caption=title)
             await status_msg.delete()
     except Exception as e:
-        logging.error(f"TikTok media error: {e}")
+        logging.error("TikTok media error: %s", sanitize_error(e))
         if status_msg:
             await status_msg.delete()
-        await context.bot.send_message(chat_id=update.effective_user.id, text=f"❌ Gagal mengunduh: {e}")
+        await context.bot.send_message(chat_id=update.effective_user.id, text=f"❌ Gagal mengunduh: {sanitize_error(e)}")
     finally:
         if filename and os.path.exists(filename):
             os.remove(filename)
@@ -250,51 +270,37 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         size = os.path.getsize(filepath)
         if size > MAX_TELEGRAM_FILE_SIZE:
-            await msg.edit_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...", disable_web_page_preview=True)
-            link = await asyncio.to_thread(upload_to_drive, filepath)
-            space = await asyncio.to_thread(get_drive_usage)
+            link = await _upload_media_to_drive(filepath, title, msg)
+            if link:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"✅ File tersimpan di Google Drive: {link}",
+                    disable_web_page_preview=True,
+                )
         else:
-            with open(filepath, "rb") as f:
+            with open(filepath, "rb") as media_file:
                 await msg.delete()
                 try:
                     if mode == "audio":
-                        await context.bot.send_audio(chat_id=query.message.chat_id, audio=f, title=title)
+                        await context.bot.send_audio(chat_id=query.message.chat_id, audio=media_file, title=title)
                     else:
-                        await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(f, filename=os.path.basename(filepath)), caption=title)
+                        await context.bot.send_document(
+                            chat_id=query.message.chat_id,
+                            document=InputFile(media_file, filename=os.path.basename(filepath)),
+                            caption=title,
+                        )
                     return
                 except telegram.error.TimedOut:
-                    warn_msg = await context.bot.send_message(chat_id=query.message.chat_id, text="⚠️ Gagal kirim file ke Telegram. File terlalu besar atau koneksi lambat, mengunggah ke Google Drive...")
-                    link = await asyncio.to_thread(upload_to_drive, filepath)
-                    space = await asyncio.to_thread(get_drive_usage)
-                    await warn_msg.delete()
-
-        filename = os.path.basename(filepath)
-        filesize_mb = round(size / (1024 * 1024), 2)
-        filetype = mimetypes.guess_type(filename)[0] or "Unknown"
-        file_id = link.split("/d/")[1].split("/")[0]
-        view_url = f"https://drive.google.com/file/d/{file_id}/view"
-        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=(
-                "✅ *File berhasil diunggah ke Google Drive!*\n\n"
-                f"📁 *Nama*: `{filename}`\n"
-                f"📄 *Ukuran*: `{filesize_mb} MB`\n"
-                f"🧾 *Tipe*: `{filetype}`\n"
-                f"⏱️ *Durasi proses*: `{duration_str}`\n"
-                f"☁️ *Server*: Google Drive\n"
-                f"\n💾 {space}"
-            ),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 View / Download", url=download_url)]
-            ]),
-            parse_mode=telegram.constants.ParseMode.MARKDOWN,
-            disable_web_page_preview=True
-            )
+                    link = await _upload_media_to_drive(filepath, title, msg)
+                    if link:
+                        await context.bot.send_message(
+                            chat_id=query.message.chat_id,
+                            text=f"✅ File tersimpan di Google Drive: {link}",
+                            disable_web_page_preview=True,
+                        )
 
     except Exception as e:
-        await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Gagal proses file: {e}")
+        await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Gagal proses file: {sanitize_error(e)}")
     finally:
         if os.path.exists(filepath):
             os.remove(filepath)
@@ -328,10 +334,7 @@ async def download_youtube_music_command(update: Update, context: ContextTypes.D
             raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
         size = os.path.getsize(filepath)
         if size > MAX_TELEGRAM_FILE_SIZE:
-            await msg.edit_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...")
-            link = await asyncio.to_thread(upload_to_drive, filepath)
-            space = await asyncio.to_thread(get_drive_usage)
-            await update.message.reply_text(f"⚠️ File terlalu besar.\n📁 Diupload ke Google Drive:\n{link}\n\n💾 {space}")
+            await _upload_media_to_drive(filepath, title, msg)
         else:
             with open(filepath, "rb") as media_file:
                 await msg.delete()
@@ -340,7 +343,7 @@ async def download_youtube_music_command(update: Update, context: ContextTypes.D
                     title=title,
                 )
     except Exception as error:
-        await msg.edit_text(f"❌ Gagal kirim file: {error}")
+        await msg.edit_text(f"❌ Gagal kirim file: {sanitize_error(error)}")
     finally:
         if os.path.exists(filepath):
             os.remove(filepath)
@@ -382,10 +385,7 @@ async def _download_instagram(update: Update, url: str):
         if not os.path.isfile(filepath):
             raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
-            await msg.edit_text("⏳ File besar, mengunggah ke Google Drive...")
-            link = await asyncio.to_thread(upload_to_drive, filepath)
-            space = await asyncio.to_thread(get_drive_usage)
-            await update.message.reply_text(f"✅ Instagram media tersimpan di Google Drive:\n{link}\n\n💾 {space}")
+            await _upload_media_to_drive(filepath, title, msg)
         else:
             with open(filepath, "rb") as media_file:
                 await msg.delete()
@@ -394,8 +394,8 @@ async def _download_instagram(update: Update, url: str):
                     caption=title,
                 )
     except Exception as error:
-        logging.error("Instagram download error: %s", error)
-        await msg.edit_text(f"❌ Gagal unduh IG: {error}")
+        logging.error("Instagram download error: %s", sanitize_error(error))
+        await msg.edit_text(f"❌ Gagal unduh IG: {sanitize_error(error)}")
     finally:
         if filepath and os.path.exists(filepath):
             os.remove(filepath)
@@ -430,16 +430,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         raise FileNotFoundError("yt-dlp tidak menemukan file hasil unduhan")
                     size = os.path.getsize(filepath)
                     if size > MAX_TELEGRAM_FILE_SIZE:
-                        await msg.edit_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...")
-                        link = await asyncio.to_thread(upload_to_drive, filepath)
-                        space = await asyncio.to_thread(get_drive_usage)
-                        await update.message.reply_text(f"⚠️ File terlalu besar.\n📁 Diupload ke Google Drive:\n{link}\n\n💾 {space}")
+                        await _upload_media_to_drive(filepath, title, msg)
                     else:
                         with open(filepath, "rb") as f:
                             await msg.delete()
                             await update.message.reply_audio(audio=InputFile(f, filename=os.path.basename(filepath)), title=title)
                 except Exception as error:
-                    await msg.edit_text(f"❌ Gagal kirim file: {error}")
+                    await msg.edit_text(f"❌ Gagal kirim file: {sanitize_error(error)}")
                 finally:
                     if os.path.exists(filepath):
                         os.remove(filepath)
