@@ -85,7 +85,7 @@ class FeatureUpgradeTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from telegram_bot import config
 
-        with patch.dict(os.environ, {"COOKIE_FILE_PATH": "non_existent_file.txt"}):
+        with patch.dict(os.environ, {"YTDLP_COOKIES_FILE": "non_existent_file.txt", "COOKIE_FILE_PATH": ""}):
             with patch.object(config.Path, "is_file", return_value=False):
                 self.assertIsNone(config.get_cookie_file())
 
@@ -94,13 +94,36 @@ class FeatureUpgradeTests(unittest.IsolatedAsyncioTestCase):
             temp_path = tf.name
 
         try:
-            with patch.dict(os.environ, {"COOKIE_FILE_PATH": temp_path}):
+            with patch.dict(os.environ, {"YTDLP_COOKIES_FILE": temp_path, "COOKIE_FILE_PATH": ""}):
                 self.assertEqual(config.get_cookie_file(), str(Path(temp_path).resolve()))
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_scoped_cookie_file_isolates_and_cleans_up(self):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", delete=False) as tf:
+            tf.write("# Netscape HTTP Cookie File\n.youtube.com TRUE / FALSE 1700000000 SID abc\n")
+            master_path = tf.name
+
+        try:
+            with patch.object(media_service, "resolve_cookies_file", return_value=Path(master_path)):
+                with media_service.scoped_cookie_file() as tmp_cookie:
+                    self.assertIsNotNone(tmp_cookie)
+                    self.assertTrue(os.path.isfile(tmp_cookie))
+                    self.assertNotEqual(tmp_cookie, master_path)
+                    with open(tmp_cookie, "r", encoding="utf-8") as f:
+                        self.assertIn("SID abc", f.read())
+
+                self.assertFalse(os.path.exists(tmp_cookie))
+                self.assertTrue(os.path.isfile(master_path))
+        finally:
+            if os.path.exists(master_path):
+                os.remove(master_path)
+
     def test_yt_dlp_options_include_cookiefile_and_runtimes(self):
+        from contextlib import contextmanager
         captured_opts = {}
 
         class DummyYDL:
@@ -119,7 +142,11 @@ class FeatureUpgradeTests(unittest.IsolatedAsyncioTestCase):
             def prepare_filename(self, info):
                 return "youtube-dump/dummy123_Test_Title.mp4"
 
-        with patch.object(media_service, "get_cookie_file", return_value="/tmp/test_cookies.txt"):
+        @contextmanager
+        def _mock_scoped():
+            yield "/tmp/test_cookies.txt"
+
+        with patch.object(media_service, "scoped_cookie_file", _mock_scoped):
             with patch.object(media_service.yt_dlp, "YoutubeDL", DummyYDL):
                 media_service.extract_youtube_info("https://youtu.be/dummy123")
                 self.assertEqual(captured_opts.get("cookiefile"), "/tmp/test_cookies.txt")
@@ -129,6 +156,24 @@ class FeatureUpgradeTests(unittest.IsolatedAsyncioTestCase):
                 captured_opts.clear()
                 media_service.download_youtube("https://youtu.be/dummy123")
                 self.assertEqual(captured_opts.get("cookiefile"), "/tmp/test_cookies.txt")
+
+    async def test_offer_youtube_format_handles_cookie_block(self):
+        message = SimpleNamespace(reply_text=AsyncMock())
+        user = SimpleNamespace(id=42, username="tester", first_name="Tester")
+        update = SimpleNamespace(message=message, effective_user=user)
+        context = SimpleNamespace(bot_data={})
+
+        with patch.object(
+            media_handler,
+            "extract_youtube_info",
+            side_effect=RuntimeError("Sign in to confirm you're not a bot"),
+        ):
+            await media_handler.offer_youtube_format(update, "https://youtu.be/dummy", context)
+
+        message.reply_text.assert_awaited_once()
+        reply_call = message.reply_text.call_args[0][0]
+        self.assertIn("requires valid authentication cookies", reply_call)
+        self.assertIn("cookies.txt", reply_call)
 
 
 if __name__ == "__main__":
