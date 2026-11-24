@@ -18,7 +18,13 @@ from .services import drive as drive_service
 async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.error is None:
         return
-    logging.error("Unhandled error: %s", drive_service.sanitize_error(context.error))
+    update_id = getattr(update, "update_id", "none")
+    logging.error(
+        "Unhandled error processing update %s: %s",
+        update_id,
+        drive_service.sanitize_error(context.error),
+        exc_info=context.error if isinstance(context.error, BaseException) else True,
+    )
 
 
 def build_application():

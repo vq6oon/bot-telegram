@@ -142,6 +142,7 @@ def auto_cleanup_drive(
                 svc.files().delete(fileId=f["id"]).execute()
                 deleted_any = True
                 usage -= int(f.get("size", 0))
+                logging.info("[DRIVE] Auto-cleaned file id: %s", f["id"])
                 if usage < threshold_bytes:
                     return
             except Exception as e:
@@ -190,6 +191,7 @@ def upload_to_drive(
         response = req.execute()
 
     file_id = response.get("id")
+    logging.info("[DRIVE] Uploaded '%s' (id: %s) to Google Drive", name, file_id)
     try:
         svc.permissions().create(fileId=file_id, body={"type": "anyone", "role": "reader"}).execute()
     except Exception as e:

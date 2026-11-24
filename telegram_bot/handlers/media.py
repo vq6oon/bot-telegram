@@ -34,6 +34,31 @@ def _user_tag(user) -> str:
     return f"@{user.username}" if user.username else (user.first_name or str(user.id))
 
 
+def _safe_user(update) -> str:
+    if not update:
+        return "Unknown"
+    user = getattr(update, "effective_user", None)
+    if not user and hasattr(update, "message"):
+        user = getattr(update.message, "from_user", None)
+    if not user and hasattr(update, "callback_query"):
+        user = getattr(update.callback_query, "from_user", None)
+    return _user_tag(user)
+
+
+def _safe_chat_id(update) -> str:
+    if not update:
+        return "unknown"
+    chat = getattr(update, "effective_chat", None)
+    if chat and hasattr(chat, "id"):
+        return str(chat.id)
+    msg = getattr(update, "message", None)
+    if msg and hasattr(msg, "chat_id"):
+        return str(msg.chat_id)
+    if msg and hasattr(msg, "chat") and hasattr(msg.chat, "id"):
+        return str(msg.chat.id)
+    return "unknown"
+
+
 async def _safe_edit_text(message, text: str, **kwargs) -> None:
     try:
         await message.edit_text(text, **kwargs)
@@ -43,6 +68,7 @@ async def _safe_edit_text(message, text: str, **kwargs) -> None:
 
 async def active_downloads_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
+        logging.info("[STATUS] %s checked active download stack", _safe_user(update))
         await update.message.reply_text(format_active_jobs(), parse_mode="HTML")
 
 
@@ -108,6 +134,7 @@ async def offer_youtube_format(update: Update, url: str, context: ContextTypes.D
     )
 
     safe_user = html.escape(_user_tag(update.effective_user))
+    logging.info("[YT] Offered formats to %s for '%s'", _user_tag(update.effective_user), title)
     await update.message.reply_text(
         f"<b>{html.escape(title)}</b>\n"
         f"Select format (locked to {safe_user}):{stack_note}",
@@ -137,6 +164,8 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         else (update.effective_user.id if update.effective_user else None)
     )
     if owner_id and user_id and user_id != owner_id:
+        caller = _user_tag(query.from_user or update.effective_user)
+        logging.warning("[YT] Unauthorized button click by %s (owner: %s)", caller, owner_id)
         return await query.answer(
             "This button belongs to the user who requested the link.",
             show_alert=True,
@@ -145,10 +174,12 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     if mode == "cancel":
         context.bot_data.pop(f"yt_{token}", None)
+        logging.info("[YT] %s cancelled format selection", _user_tag(query.from_user or update.effective_user))
         return await query.edit_message_text("Cancelled.")
 
     if mode == "submenu":
         url = session["url"]
+        logging.info("[YT] %s opened subtitle menu for '%s'", _user_tag(query.from_user or update.effective_user), session.get("title", ""))
         try:
             info = await asyncio.to_thread(extract_youtube_info, url)
             subtitles = info.get("subtitles") or {}
@@ -173,6 +204,8 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         url = session["url"]
         context.bot_data.pop(f"yt_{token}", None)
         lang = resolution or "id"
+        caller = _user_tag(query.from_user or update.effective_user)
+        logging.info("[YT] %s requested subtitle (%s) for '%s'", caller, lang.upper(), session.get("title", ""))
         status = await query.edit_message_text("Downloading subtitle...")
         result = await asyncio.to_thread(download_subtitle, url, lang=lang)
         if not result:
@@ -187,6 +220,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     document=InputFile(f, filename=os.path.basename(sub_path)),
                     caption=f"Subtitle ({lang.upper()}): {sub_title}",
                 )
+            logging.info("[YT] Sent subtitle (%s) to chat %s: %s", lang.upper(), query.message.chat_id, sub_title)
         except Exception as e:
             logging.error("Failed to send subtitle: %s", sanitize_error(e))
             await status.edit_text("Failed to send subtitle.")
@@ -203,7 +237,15 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     title = session["title"]
 
     job_id = token[:4]
-    add_job(job_id, _user_tag(update.effective_user), title)
+    user_tag = _user_tag(update.effective_user)
+    logging.info(
+        "[YT] %s queued %s download (res: %s) for '%s'",
+        user_tag,
+        mode,
+        resolution or "default",
+        title,
+    )
+    add_job(job_id, user_tag, title)
     status = await query.edit_message_text(f"Queued: {title}...")
 
     filepath = None
@@ -244,6 +286,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await _safe_edit_text(
                     status, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
                 )
+                logging.info("[YT] Uploaded to Drive for chat %s: %s (%s)", query.message.chat_id, final_title, link)
             else:
                 try:
                     with open(filepath, "rb") as media_file:
@@ -260,6 +303,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                                 document=InputFile(media_file, filename=os.path.basename(filepath)),
                                 caption=final_title,
                             )
+                    logging.info("[YT] Sent %s to chat %s: %s", mode, query.message.chat_id, final_title)
                 except (BadRequest, TimedOut) as tg_err:
                     logging.warning(
                         "Telegram direct send failed (%s); falling back to Google Drive.",
@@ -274,6 +318,7 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     await _safe_edit_text(
                         fallback, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
                     )
+                    logging.info("[YT] Uploaded to Drive for chat %s: %s (%s)", query.message.chat_id, final_title, link)
     except Exception as e:
         logging.error("Processing error: %s", sanitize_error(e))
         await context.bot.send_message(chat_id=query.message.chat_id, text="Failed to process video.")
@@ -294,6 +339,7 @@ async def download_youtube_command(update: Update, context: ContextTypes.DEFAULT
     url = context.args[0].strip()
     if not normalize_media_url(url, "youtube"):
         return await update.message.reply_text("Invalid YouTube URL.")
+    logging.info("[YT] %s requested: %s", _safe_user(update), url)
     await offer_youtube_format(update, url, context)
 
 
@@ -306,6 +352,8 @@ async def download_youtube_music_command(update: Update, context: ContextTypes.D
     if not normalize_media_url(url, "youtube") or "music.youtube.com" not in url:
         return await update.message.reply_text("URL must be from music.youtube.com.")
 
+    chat_id = _safe_chat_id(update)
+    logging.info("[YTM] %s requested: %s", _safe_user(update), url)
     status = await update.message.reply_text("Downloading audio...")
     filepath = None
     try:
@@ -317,12 +365,14 @@ async def download_youtube_music_command(update: Update, context: ContextTypes.D
             await status.edit_text("File exceeds 50 MB. Uploading to Google Drive...")
             link = await asyncio.to_thread(upload_to_drive, filepath)
             await status.edit_text(f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
+            logging.info("[YTM] Uploaded to Drive for chat %s: %s (%s)", chat_id, title, link)
         else:
             with open(filepath, "rb") as f:
                 await status.delete()
                 await update.message.reply_audio(
                     audio=InputFile(f, filename=os.path.basename(filepath)), title=title
                 )
+            logging.info("[YTM] Sent track to chat %s: %s", chat_id, title)
     except Exception as e:
         logging.error("YouTube Music error: %s", sanitize_error(e))
         await _safe_edit_text(status, "Failed to process YouTube Music track.")
@@ -343,6 +393,8 @@ async def download_instagram_command(update: Update, context: ContextTypes.DEFAU
     if not normalize_media_url(url, "instagram"):
         return await update.message.reply_text("Invalid Instagram URL.")
 
+    chat_id = _safe_chat_id(update)
+    logging.info("[IG] %s requested: %s", _safe_user(update), url)
     status = await update.message.reply_text("Downloading Instagram media...")
     filepath = None
     try:
@@ -367,12 +419,14 @@ async def download_instagram_command(update: Update, context: ContextTypes.DEFAU
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
             link = await asyncio.to_thread(upload_to_drive, filepath)
             await status.edit_text(f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
+            logging.info("[IG] Uploaded to Drive for chat %s: %s (%s)", chat_id, title, link)
         else:
             with open(filepath, "rb") as f:
                 await status.delete()
                 await update.message.reply_video(
                     video=InputFile(f, filename=os.path.basename(filepath)), caption=title
                 )
+            logging.info("[IG] Sent media to chat %s: %s", chat_id, title)
     except Exception as e:
         logging.error("Instagram error: %s", sanitize_error(e))
         await _safe_edit_text(status, "Failed to download Instagram media.")
@@ -401,6 +455,7 @@ async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         else (update.effective_user.id if update.effective_user else None)
     )
     if not data or not is_tiktok_owner(data, user_id):
+        logging.warning("[TIKTOK] Unauthorized button click by user %s", user_id)
         return await query.answer("This button belongs to the requester.", show_alert=True)
 
     await query.answer()
@@ -413,6 +468,7 @@ async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         if os.path.getsize(filename) > MAX_TELEGRAM_FILE_SIZE:
             link = await asyncio.to_thread(upload_to_drive, filename)
             await status.edit_text(f"Saved to Google Drive:\n{link}", disable_web_page_preview=True)
+            logging.info("[TIKTOK] Uploaded %s to Drive for user %s: %s", mode, user_id, link)
         else:
             with open(filename, "rb") as f:
                 if mode == "audio":
@@ -420,6 +476,7 @@ async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 else:
                     await context.bot.send_video(chat_id=user_id, video=f, caption=data.get("title"))
             await status.delete()
+            logging.info("[TIKTOK] Delivered %s to user %s: %s", mode, user_id, data.get("title"))
     except Exception as e:
         logging.error("TikTok error: %s", sanitize_error(e))
         await _safe_edit_text(status, "Failed to download TikTok.")
@@ -443,6 +500,9 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if getattr(video, "file_size", None) and video.file_size > MAX_TELEGRAM_DOWNLOAD_SIZE:
         return await msg.reply_text("Video exceeds Telegram's 20 MB bot limit.")
 
+    user = _safe_user(update)
+    logging.info("[CONVERT] %s requested video conversion to audio", user)
+
     os.makedirs("converted", exist_ok=True)
     run_id = uuid.uuid4().hex[:6]
     in_file = f"converted/{run_id}_in.mp4"
@@ -464,6 +524,7 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(out_file, "rb") as f:
             await status.delete()
             await msg.reply_audio(audio=InputFile(f, filename="audio.mp3"))
+        logging.info("[CONVERT] Delivered audio conversion to %s", user)
     except Exception as e:
         logging.error("Convert error: %s", sanitize_error(e))
         await _safe_edit_text(status, "Conversion failed.")
@@ -495,6 +556,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await download_instagram_command(update, context)
 
     if "tiktok.com" in text:
+        logging.info("[TIKTOK] %s sent link: %s", _user_tag(user), text)
         msg = await update.message.reply_text("🔍 Mendeteksi link TikTok...")
         try:
             r = requests.get("https://tikwm.com/api/", params={"url": text})
@@ -507,6 +569,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ]
                     try:
                         await context.bot.send_media_group(chat_id=user.id, media=media_group)
+                        logging.info("[TIKTOK] Delivered photo album to %s", user.id)
                         await update.message.reply_text(
                             "✅ Album foto TikTok dikirim lewat chat pribadi Anda.",
                             reply_to_message_id=update.message.message_id,
@@ -543,6 +606,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "✅ Pilihan dikirim lewat chat pribadi Anda. Unduhan juga akan dikirim ke chat pribadi.",
                         reply_to_message_id=update.message.message_id,
                     )
+                    logging.info("[TIKTOK] Sent format options to %s", user.id)
                     await msg.delete()
                 except Exception as e:
                     logging.info("TikTok private delivery unavailable: %s", sanitize_error(e))
