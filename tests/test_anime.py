@@ -47,20 +47,40 @@ class AnimeServiceTests(unittest.TestCase):
 
     def test_search_anime_captures_fzf_shim_and_strips_ansi(self):
         def fake_run(cmd, **kwargs):
+            self.assertIn("-d", cmd)
             capture = kwargs["env"]["ANI_CLI_CAPTURE_FILE"]
+            shim_dir = kwargs["env"]["PATH"].split(os.pathsep)[0]
+            self.assertTrue(os.path.isfile(os.path.join(shim_dir, "mpv")))
+            self.assertTrue(os.path.isfile(os.path.join(shim_dir, "fzf")))
             Path(capture).write_text(
                 "\x1b[32mFrieren (28 episodes)\x1b[0m\nFrieren Dub\nTitle 3\nTitle 4\nTitle 5\nTitle 6\n",
                 encoding="utf-8",
             )
             self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
-            return SimpleNamespace(returncode=1)
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
 
         with patch.object(anime_service, "is_ani_cli_available", return_value="/usr/bin/ani-cli"), \
+             patch.object(anime_service.shutil, "which", return_value=None), \
              patch.object(anime_service.subprocess, "run", side_effect=fake_run):
             results = anime_service.search_anime("frieren", max_results=5)
 
         self.assertEqual(len(results), 5)
         self.assertEqual(results[0], "Frieren (28 episodes)")
+
+    def test_search_anime_raises_not_found_and_ignores_episode_only_capture(self):
+        not_found = SimpleNamespace(returncode=1, stdout="No results found!\n", stderr="")
+        with patch.object(anime_service, "is_ani_cli_available", return_value="/usr/bin/ani-cli"), \
+             patch.object(anime_service.subprocess, "run", return_value=not_found):
+            with self.assertRaises(anime_service.AnimeNotFoundError):
+                anime_service.search_anime("aldi makan bakso")
+
+        def single_match_run(cmd, **kwargs):
+            Path(kwargs["env"]["ANI_CLI_CAPTURE_FILE"]).write_text("1\n2\n3\n", encoding="utf-8")
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with patch.object(anime_service, "is_ani_cli_available", return_value="/usr/bin/ani-cli"), \
+             patch.object(anime_service.subprocess, "run", side_effect=single_match_run):
+            self.assertEqual(anime_service.search_anime("exact single match"), [])
 
     def test_download_anime_passes_noninteractive_flags_and_returns_file(self):
         captured_cmd = []
@@ -106,6 +126,19 @@ class AnimeHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         msg.reply_text.assert_awaited_once()
         self.assertIn("not installed", msg.reply_text.await_args.args[0])
+
+    async def test_command_reports_no_anime_found(self):
+        status = SimpleNamespace(edit_text=AsyncMock())
+        msg = SimpleNamespace(reply_text=AsyncMock(return_value=status), message_id=10)
+        update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=1, username="u", first_name="U"))
+        context = SimpleNamespace(args=["aldi", "makan", "bakso"], bot_data={})
+
+        with patch.object(anime_handler, "is_ani_cli_available", return_value="/usr/bin/ani-cli"), \
+             patch.object(anime_handler, "search_anime", side_effect=anime_handler.AnimeNotFoundError("none")):
+            await anime_handler.download_anime_command(update, context)
+
+        status.edit_text.assert_awaited_once()
+        self.assertIn("No anime found", status.edit_text.await_args.args[0])
 
     async def test_callback_enforces_owner_lock(self):
         query = SimpleNamespace(

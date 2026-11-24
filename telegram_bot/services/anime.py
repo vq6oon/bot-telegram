@@ -18,6 +18,7 @@ from .drive import sanitize_error
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+_EPISODE_ONLY_RE = re.compile(r"^\d+(?:\.\d+)?$")
 _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".ts", ".avi", ".mov", ".m4v"}
 _TEMP_SUFFIXES = (".part", ".tmp", ".ytdl", ".aria2")
 VALID_QUALITIES = ("360", "720", "1080", "best")
@@ -25,6 +26,10 @@ VALID_QUALITIES = ("360", "720", "1080", "best")
 
 class AnimeCliUnavailableError(RuntimeError):
     """Raised when the ani-cli binary is not found in PATH."""
+
+
+class AnimeNotFoundError(LookupError):
+    """Raised when ani-cli reports zero search matches."""
 
 
 def is_ani_cli_available() -> str | None:
@@ -106,35 +111,54 @@ def _clean_captured_titles(raw_text: str, max_results: int = 5) -> list[str]:
     return results
 
 
+def _write_executable_shim(path: str, script: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(script)
+    try:
+        os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError:
+        pass
+
+
+def _build_shim_env(shim_dir: str, *, capture_fzf: bool) -> tuple[dict[str, str], str | None]:
+    # Headless servers lack mpv/vlc; satisfy ani-cli's startup player check cleanly.
+    if not shutil.which("mpv") and not shutil.which("vlc"):
+        _write_executable_shim(os.path.join(shim_dir, "mpv"), "#!/bin/sh\nexit 0\n")
+
+    capture_file: str | None = None
+    if capture_fzf:
+        capture_file = os.path.join(shim_dir, "captured.txt")
+        _write_executable_shim(
+            os.path.join(shim_dir, "fzf"),
+            "#!/bin/sh\ncat > \"$ANI_CLI_CAPTURE_FILE\"\nexit 1\n",
+        )
+    elif not shutil.which("fzf"):
+        _write_executable_shim(os.path.join(shim_dir, "fzf"), "#!/bin/sh\nhead -n 1\n")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
+    if capture_file:
+        env["ANI_CLI_CAPTURE_FILE"] = capture_file
+    return env, capture_file
+
+
 def search_anime(query: str, max_results: int = 5) -> list[str]:
     """
-    Capture up to `max_results` titles from ani-cli using a temporary fzf shim in PATH.
-    Returns [] if capture fails so callers can fall back to `-S 1`.
+    Capture up to `max_results` titles from ani-cli using a temporary fzf + player shim.
+    Raises AnimeNotFoundError on explicit zero-result responses, and returns [] on fallback.
     """
     ani_bin = is_ani_cli_available()
     if not ani_bin:
         raise AnimeCliUnavailableError(f"'{ANI_CLI_BIN}' is not installed on this server.")
 
     with tempfile.TemporaryDirectory(prefix="anicli-shim-") as shim_dir:
-        capture_file = os.path.join(shim_dir, "captured.txt")
-        fzf_path = os.path.join(shim_dir, "fzf")
-        shim_script = "#!/bin/sh\ncat > \"$ANI_CLI_CAPTURE_FILE\"\nexit 1\n"
-        with open(fzf_path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(shim_script)
-        try:
-            os.chmod(fzf_path, os.stat(fzf_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        except OSError:
-            pass
-
-        env = os.environ.copy()
-        env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
-        env["ANI_CLI_CAPTURE_FILE"] = capture_file
+        env, capture_file = _build_shim_env(shim_dir, capture_fzf=True)
 
         try:
-            subprocess.run(
-                [ani_bin, query],
+            proc = subprocess.run(
+                [ani_bin, "-d", query],
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=ANI_CLI_SEARCH_TIMEOUT_SECONDS,
@@ -145,16 +169,35 @@ def search_anime(query: str, max_results: int = 5) -> list[str]:
             logging.warning("[ANIME] Search shim failed for '%s': %s", query, sanitize_error(err))
             return []
 
-        if not os.path.isfile(capture_file):
-            return []
+        raw = ""
+        if capture_file and os.path.isfile(capture_file):
+            try:
+                raw = Path(capture_file).read_text(encoding="utf-8", errors="replace")
+            except OSError as err:
+                logging.warning("[ANIME] Failed to read captured search results: %s", sanitize_error(err))
+                return []
 
-        try:
-            raw = Path(capture_file).read_text(encoding="utf-8", errors="replace")
-        except OSError as err:
-            logging.warning("[ANIME] Failed to read captured search results: %s", sanitize_error(err))
-            return []
+        titles = _clean_captured_titles(raw, max_results=max_results)
+        if titles:
+            # Single search match skips the title menu in ani-cli and pipes episode numbers to fzf.
+            if all(_EPISODE_ONLY_RE.match(item) for item in titles):
+                logging.info("[ANIME] Single search match for '%s'; defaulting to #1", query)
+                return []
+            return titles
 
-        return _clean_captured_titles(raw, max_results=max_results)
+        output = " ".join(
+            part.strip() for part in (getattr(proc, "stderr", ""), getattr(proc, "stdout", "")) if part
+        )
+        if "no results found" in output.lower():
+            raise AnimeNotFoundError(f"No anime found for '{query}'.")
+        if output or getattr(proc, "returncode", 0) != 0:
+            logging.warning(
+                "[ANIME] Search returned no list for '%s' (code=%s): %s",
+                query,
+                getattr(proc, "returncode", "?"),
+                sanitize_error(RuntimeError(output[:200] or "empty output")),
+            )
+        return []
 
 
 def _find_downloaded_file(job_dir: str) -> str | None:
@@ -217,32 +260,35 @@ def download_anime(
         cmd.append("--dub")
     cmd.append(query)
 
-    env = os.environ.copy()
-    env["ANI_CLI_DOWNLOAD_DIR"] = job_dir
+    with tempfile.TemporaryDirectory(prefix="anicli-dl-shim-") as shim_dir:
+        env, _ = _build_shim_env(shim_dir, capture_fzf=False)
+        env["ANI_CLI_DOWNLOAD_DIR"] = job_dir
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=ANI_CLI_TIMEOUT_SECONDS,
-            env=env,
-            cwd=job_dir,
-            check=False,
-        )
-        if proc.returncode != 0:
-            logging.warning(
-                "[ANIME] ani-cli exited with code %s for query '%s' ep %s",
-                proc.returncode,
-                query,
-                safe_episode,
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=ANI_CLI_TIMEOUT_SECONDS,
+                env=env,
+                cwd=job_dir,
+                check=False,
             )
-    except Exception as err:
-        logging.error("[ANIME] ani-cli download failed: %s", sanitize_error(err))
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return None
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip()
+                logging.warning(
+                    "[ANIME] ani-cli exited %s for '%s' ep %s: %s",
+                    proc.returncode,
+                    query,
+                    safe_episode,
+                    sanitize_error(RuntimeError(detail[:200] or "no output")),
+                )
+        except Exception as err:
+            logging.error("[ANIME] ani-cli download failed: %s", sanitize_error(err))
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return None
 
     downloaded = _find_downloaded_file(job_dir)
     if not downloaded:

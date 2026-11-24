@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes
 from ..config import ANIME_MAX_EPISODE, MAX_TELEGRAM_FILE_SIZE
 from ..services.anime import (
     AnimeCliUnavailableError,
+    AnimeNotFoundError,
     VALID_QUALITIES,
     download_anime,
     is_ani_cli_available,
@@ -101,6 +102,8 @@ async def download_anime_command(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         results = await asyncio.to_thread(search_anime, query, 5)
+    except AnimeNotFoundError:
+        return await _safe_edit_text(status, f"No anime found for '{query}'.")
     except AnimeCliUnavailableError:
         return await _safe_edit_text(
             status, "Anime downloader (ani-cli) is not installed on this server."
