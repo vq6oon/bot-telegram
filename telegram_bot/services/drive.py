@@ -1,4 +1,4 @@
-"""Google Drive service with thread-safe token refresh, HTTP timeouts, and chunked retries."""
+"""Google Drive service with 308-safe resumable uploads, retries, and YouTube cache lookup."""
 import logging
 import mimetypes
 import os
@@ -16,7 +16,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, build_http
 from ..config import (
     DRIVE_CLEANUP_THRESHOLD_BYTES,
     DRIVE_FOLDER_NAME,
@@ -74,6 +74,8 @@ def _execute_request(req, retries: int = 3):
 
 
 def _is_retryable_upload_error(err: Exception) -> bool:
+    if isinstance(err, httplib2.RedirectMissingLocation):
+        return False
     if isinstance(err, (TimeoutError, OSError, ssl.SSLError, httplib2.HttpLib2Error)):
         return True
     if isinstance(err, HttpError):
@@ -170,7 +172,13 @@ def get_drive_service():
         elif not creds or not creds.valid:
             raise GoogleDriveAuthError("Invalid credentials. Run 'py get_token.py'.")
 
-    authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=DRIVE_HTTP_TIMEOUT_SECONDS))
+    # Exclude 308 so resumable upload chunk responses are not treated as broken redirects.
+    http_client = build_http()
+    http_client.timeout = DRIVE_HTTP_TIMEOUT_SECONDS
+    if hasattr(http_client, "redirect_codes"):
+        http_client.redirect_codes = set(http_client.redirect_codes) - {308}
+
+    authed_http = AuthorizedHttp(creds, http=http_client)
     return build("drive", "v3", http=authed_http, cache_discovery=False)
 
 
@@ -189,14 +197,70 @@ def get_or_create_folder(service, folder_name: str) -> str:
     return folder["id"]
 
 
+def _get_storage_quota(service) -> tuple[int, int]:
+    quota = _execute_request(service.about().get(fields="storageQuota")).get("storageQuota", {})
+    return int(quota.get("usage", 0)), int(quota.get("limit", 0))
+
+
+def build_youtube_app_properties(video_id: str, mode: str, resolution: str | None = None) -> dict[str, str]:
+    res_key = str(resolution).strip() if resolution else ("mp3" if mode == "audio" else "best")
+    return {
+        "yt_video_id": str(video_id).strip(),
+        "yt_mode": str(mode).strip(),
+        "yt_res": res_key,
+    }
+
+
+def find_cached_youtube_file(
+    video_id: str,
+    mode: str,
+    resolution: str | None = None,
+    folder_id: str | None = None,
+) -> dict | None:
+    """Return {'id', 'name', 'size', 'link'} if this video and format already exist in Drive."""
+    if not video_id:
+        return None
+
+    svc = get_drive_service()
+    folder = folder_id or get_or_create_folder(svc, DRIVE_FOLDER_NAME)
+    props = build_youtube_app_properties(video_id, mode, resolution)
+
+    query = (
+        f"'{folder}' in parents and trashed=false and "
+        f"appProperties has {{ key='yt_video_id' and value='{_escape(props['yt_video_id'])}' }} and "
+        f"appProperties has {{ key='yt_mode' and value='{_escape(props['yt_mode'])}' }} and "
+        f"appProperties has {{ key='yt_res' and value='{_escape(props['yt_res'])}' }}"
+    )
+    res = _execute_request(
+        svc.files().list(
+            q=query,
+            spaces="drive",
+            fields="files(id, name, size)",
+            orderBy="createdTime desc",
+            pageSize=1,
+        )
+    )
+    files = res.get("files", [])
+    if not files:
+        return None
+
+    hit = files[0]
+    file_id = hit["id"]
+    return {
+        "id": file_id,
+        "name": hit.get("name", "YouTube Media"),
+        "size": int(hit.get("size") or 0),
+        "link": f"https://drive.google.com/file/d/{file_id}/view",
+    }
+
+
 def auto_cleanup_drive(
     threshold_bytes: int = DRIVE_CLEANUP_THRESHOLD_BYTES,
     service=None,
     folder_id: str | None = None,
 ):
     svc = service or get_drive_service()
-    quota = _execute_request(svc.about().get(fields="storageQuota")).get("storageQuota", {})
-    usage = int(quota.get("usage", 0))
+    usage, _ = _get_storage_quota(svc)
     if usage < threshold_bytes:
         return
 
@@ -235,6 +299,7 @@ def upload_to_drive(
     folder_id: str | None = None,
     custom_name: str | None = None,
     on_progress=None,
+    app_properties: dict[str, str] | None = None,
 ) -> str:
     path = Path(file_path)
     if not path.is_file():
@@ -255,11 +320,15 @@ def upload_to_drive(
     )
     existing = res.get("files", [])
 
+    body: dict = {"name": name}
+    if app_properties:
+        body["appProperties"] = app_properties
+
     if existing:
-        file_id = existing[0]["id"]
-        req = svc.files().update(fileId=file_id, body={"name": name}, media_body=media, fields="id")
+        req = svc.files().update(fileId=existing[0]["id"], body=body, media_body=media, fields="id")
     else:
-        req = svc.files().create(body={"name": name, "parents": [folder]}, media_body=media, fields="id")
+        body["parents"] = [folder]
+        req = svc.files().create(body=body, media_body=media, fields="id")
 
     response = _upload_resumable_with_retries(req, on_progress=on_progress)
 
@@ -278,9 +347,7 @@ def upload_to_drive(
 
 def get_drive_usage() -> str:
     svc = get_drive_service()
-    quota = _execute_request(svc.about().get(fields="storageQuota")).get("storageQuota", {})
-    usage = int(quota.get("usage", 0))
-    limit = int(quota.get("limit", 0))
+    usage, limit = _get_storage_quota(svc)
     if limit <= 0:
         return f"{_format_bytes(usage)} used (unlimited)"
     free = max(0, limit - usage)
@@ -290,9 +357,7 @@ def get_drive_usage() -> str:
 def list_drive_files_sync(folder_id: str | None = None) -> dict:
     svc = get_drive_service()
     folder = folder_id or get_or_create_folder(svc, DRIVE_FOLDER_NAME)
-    quota = _execute_request(svc.about().get(fields="storageQuota")).get("storageQuota", {})
-    usage = int(quota.get("usage", 0))
-    limit = int(quota.get("limit", 0))
+    usage, limit = _get_storage_quota(svc)
     free = max(0, limit - usage) if limit > 0 else 0
 
     res = _execute_request(
