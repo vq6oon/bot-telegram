@@ -21,6 +21,7 @@ async def clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
         shutil.rmtree("youtube-dump", ignore_errors=True)
         shutil.rmtree("ig-dump", ignore_errors=True)
         shutil.rmtree("subs", ignore_errors=True)
+        shutil.rmtree("anime-dump", ignore_errors=True)
         await update.message.reply_text("Semua cache lokal berhasil dihapus.")
     except Exception as e:
         await update.message.reply_text(f"Gagal hapus cache: {e}")

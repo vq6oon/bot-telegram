@@ -30,13 +30,28 @@ class ApplicationWiringTests(unittest.TestCase):
                 actual.append(("callback", handler.callback.__name__, handler.pattern.pattern))
             elif isinstance(handler, MessageHandler):
                 actual.append(("message", handler.callback.__name__, str(handler.filters)))
-        expected_commands = ["start", "lapor", "rules", "shorten", "convert", "yt", "ytm", "ig", "tt", "status", "id", "github", "uptime", "clearcache", "whois", "list", "cleardrive", "checkdrive", "upload"]
+        expected_commands = [
+            "start", "lapor", "rules", "shorten", "convert",
+            "yt", "ytm", "ig", "tt", "anime", "status",
+            "id", "github", "uptime", "clearcache", "whois",
+            "list", "cleardrive", "checkdrive", "upload",
+        ]
         self.assertEqual([x[1] for x in actual if x[0] == "command"], expected_commands)
-        self.assertEqual([x[1] for x in actual if x[0] == "callback"], ["menu_callback_handler", "start_callback_handler", "tiktok_callback_handler", "yt_callback_handler", "clear_drive_callback"])
+        self.assertEqual(
+            [x[1] for x in actual if x[0] == "callback"],
+            [
+                "menu_callback_handler",
+                "start_callback_handler",
+                "tiktok_callback_handler",
+                "yt_callback_handler",
+                "anime_callback_handler",
+                "clear_drive_callback",
+            ],
+        )
         self.assertEqual([x[1] for x in actual if x[0] == "message"], ["handle_laporan_balasan", "upload"])
         self.assertEqual(builder.concurrent_limit, 8)
-        self.assertEqual(len(handlers), 26)
-        self.assertEqual(handlers[23].callback.__name__, handlers[24].callback.__name__)
+        self.assertEqual(len(handlers), 28)
+        self.assertEqual(handlers[25].callback.__name__, handlers[26].callback.__name__)
 
     def test_entrypoint_only_loads_environment_and_starts_bot(self):
         from pathlib import Path

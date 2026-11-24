@@ -18,6 +18,7 @@ WELCOME_CAPTION = (
     "│  ├─ 360P\n"
     "│  ├─ Audio\n"
     "│  └─ Subtitle\n"
-    "└ YouTube Music (MP3) (`/ytm <link>`)\n\n"
+    "├ YouTube Music (MP3) (`/ytm <link>`)\n"
+    "└ Anime (`/anime <judul> [-e <ep>]`)\n\n"
     "Versi: v1.5.0 | Lamp1on-Bot"
 )

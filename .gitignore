@@ -25,6 +25,7 @@ node_modules/
 /node_modules/
 deno.lock
 /youtube-dump/
+/anime-dump/
 /converted/
 /temp_upload/
 /uploads/

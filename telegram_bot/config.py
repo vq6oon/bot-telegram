@@ -64,6 +64,12 @@ DRIVE_UPLOAD_MAX_RETRIES = max(1, _int_env("DRIVE_UPLOAD_MAX_RETRIES", 5))
 MAX_CONCURRENT_DOWNLOADS = max(1, _int_env("MAX_CONCURRENT_DOWNLOADS", 3))
 DOWNLOAD_RATELIMIT_BYTES = _int_env("DOWNLOAD_RATELIMIT_KBPS", 0) * 1024
 
+# Anime downloads (ani-cli)
+ANI_CLI_BIN = os.environ.get("ANI_CLI_BIN", "ani-cli").strip() or "ani-cli"
+ANI_CLI_TIMEOUT_SECONDS = max(30, _int_env("ANI_CLI_TIMEOUT_SECONDS", 600))
+ANI_CLI_SEARCH_TIMEOUT_SECONDS = max(10, _int_env("ANI_CLI_SEARCH_TIMEOUT_SECONDS", 30))
+ANIME_MAX_EPISODE = max(1, _int_env("ANIME_MAX_EPISODE", 5000))
+
 # YouTube cookies for yt-dlp
 _custom_cookies = os.environ.get("YTDLP_COOKIES_FILE", "").strip() or os.environ.get("COOKIE_FILE_PATH", "").strip()
 YTDLP_COOKIES_FILE = Path(_custom_cookies) if _custom_cookies else (BASE_DIR / "cookies.txt")
