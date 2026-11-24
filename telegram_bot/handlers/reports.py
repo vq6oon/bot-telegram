@@ -6,7 +6,7 @@ from ..config import GROUP_LAPOR_ID
 
 async def lapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📨 Silakan ketik laporan atau pesan Anda lalu kirim.\n"
+        "Silakan ketik laporan atau pesan Anda lalu kirim.\n"
         "Bot akan meneruskannya ke admin.",
         reply_markup=ForceReply(selective=True)
     )
@@ -18,15 +18,12 @@ async def handle_laporan_balasan(update: Update, context: ContextTypes.DEFAULT_T
         isi_laporan = update.message.text
 
         text_admin = (
-            f"📬 *Laporan Baru dari Pengguna:*\n"
+            f"*Laporan Baru dari Pengguna:*\n"
             f"{user_info}\n\n"
-            f"📝 Pesan:\n{isi_laporan}"
+            f"Pesan:\n{isi_laporan}"
         )
 
-        # Notify user that report is being sent
-        status_msg = await update.message.reply_text("⏳ Mengirim laporan kamu ke admin...")
-
-        # Log report details to terminal
+        status_msg = await update.message.reply_text("Mengirim laporan kamu ke admin...")
         logging.info(f"[LAPOR] Dari {user_info}: {isi_laporan}")
 
         try:
@@ -35,9 +32,9 @@ async def handle_laporan_balasan(update: Update, context: ContextTypes.DEFAULT_T
                 text=text_admin,
                 parse_mode=ParseMode.MARKDOWN
             )
-            await status_msg.edit_text("✅ Laporan berhasil dikirim ke admin. Terima kasih!")
+            await status_msg.edit_text("Laporan berhasil dikirim ke admin. Terima kasih!")
             return
         except Exception as e:
             logging.error(f"[LAPOR] Gagal kirim laporan ke grup: {e}")
-            await status_msg.edit_text(f"❌ Gagal kirim laporan ke admin: {e}")
+            await status_msg.edit_text(f"Gagal kirim laporan ke admin: {e}")
             return

@@ -13,19 +13,19 @@ from ..menus.commands import COMMANDS_CAPTION
 
 async def shorten(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        return await update.message.reply_text("📌 Contoh penggunaan:\n/shorten https://youtube.com/...")
+        return await update.message.reply_text("Contoh penggunaan:\n/shorten https://youtube.com/...")
 
     url = context.args[0]
 
     if not url.startswith("http"):
-        return await update.message.reply_text("❌ Link tidak valid. Harus diawali dengan http atau https.")
+        return await update.message.reply_text("Link tidak valid. Harus diawali dengan http atau https.")
 
     try:
         res = requests.get(f"https://tinyurl.com/api-create.php?url={url}", timeout=10)
         short_url = res.text
-        await update.message.reply_text(f"🔗 Shortlink:\n{short_url}")
+        await update.message.reply_text(f"Shortlink:\n{short_url}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Gagal membuat shortlink: {e}")
+        await update.message.reply_text(f"Gagal membuat shortlink: {e}")
 
 async def github_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -41,7 +41,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     caption = WELCOME_CAPTION
 
-    keyboard = [[InlineKeyboardButton("📋 Daftar Perintah Bot", callback_data="open_menu_commands")]]
+    keyboard = [[InlineKeyboardButton("Daftar Perintah Bot", callback_data="open_menu_commands")]]
 
     try:
         with open(image_path, "rb") as photo:
@@ -58,7 +58,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.info(f"[START] {get_user_info(user)} membuka menu utama")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Gagal kirim gambar pembuka: {e}")
+        await update.message.reply_text(f"Gagal kirim gambar pembuka: {e}")
         user = update.effective_user
         logging.info(f"[START] {get_user_info(user)} membuka menu utama")
 
@@ -71,7 +71,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     caption = COMMANDS_CAPTION
 
-    keyboard = [[InlineKeyboardButton("⬅️ Kembali", callback_data="back_to_main")]]
+    keyboard = [[InlineKeyboardButton("Kembali", callback_data="back_to_main")]]
 
     try:
         await query.edit_message_caption(
@@ -80,7 +80,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
-        await query.edit_message_text(f"❌ Gagal tampilkan menu perintah: {e}")
+        await query.edit_message_text(f"Gagal tampilkan menu perintah: {e}")
 
 async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global START_IMAGE_FILE_ID
@@ -91,12 +91,12 @@ async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     logging.info(f"[BACK] {get_user_info(user)} kembali ke menu utama")
 
     if not START_IMAGE_FILE_ID:
-        await query.edit_message_text("⚠️ Gambar pembuka belum tersedia.")
+        await query.edit_message_text("Gambar pembuka belum tersedia.")
         return
 
     caption = WELCOME_CAPTION
 
-    keyboard = [[InlineKeyboardButton("📋 Daftar Perintah Bot", callback_data="open_menu_commands")]]
+    keyboard = [[InlineKeyboardButton("Daftar Perintah Bot", callback_data="open_menu_commands")]]
 
     try:
         await context.bot.edit_message_media(
@@ -117,11 +117,11 @@ async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             )
             logging.info(f"[BACK] {get_user_info(query.from_user)} fallback kirim ulang menu utama")
         except Exception as err:
-            await query.edit_message_text(f"❌ Gagal tampilkan menu utama: {err}")
+            await query.edit_message_text(f"Gagal tampilkan menu utama: {err}")
 
 async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "📜 *Aturan Penggunaan Lamp1on-Bot:*\n\n"
+        "*Aturan Penggunaan Lamp1on-Bot:*\n\n"
         "1. Gunakan bot secara *wajar*, jangan spam link atau file.\n"
         "2. Link yang didukung: *YouTube, TikTok, Instagram*.\n"
         "3. File besar akan diunggah ke *Google Drive publik*.\n"
@@ -136,8 +136,8 @@ async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     logging.info(f"[ID] {get_user_info(user)} melihat ID-nya")
     await update.message.reply_text(
-        f"🆔 ID kamu: `{user.id}`\n"
-        f"👤 Username: @{user.username or '–'}\n"
-        f"📛 Nama: {user.full_name}",
+        f"ID kamu: `{user.id}`\n"
+        f"Username: @{user.username or '-'}\n"
+        f"Nama: {user.full_name}",
         parse_mode=ParseMode.MARKDOWN
     )

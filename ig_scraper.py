@@ -7,7 +7,7 @@ async def scrape_ig_video(url: str) -> tuple[str, str] | None:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
-            print(f"🔍 Membuka: {url}")
+            print(f"Membuka: {url}")
             await page.goto(url, timeout=20000)
 
             # Locate video element
@@ -29,10 +29,10 @@ async def scrape_ig_video(url: str) -> tuple[str, str] | None:
                         txt = await el.inner_text()
                         if txt:
                             caption = txt.strip()
-                            print(f"✅ Caption ditemukan: {caption[:100]}...")
+                            print(f"Caption ditemukan: {caption[:100]}...")
                             break
                 except Exception as e:
-                    print(f"❌ Gagal selector: {selector} → {e}")
+                    print(f"Gagal selector: {selector} -> {e}")
 
             return video_url, caption
         except Exception as e:

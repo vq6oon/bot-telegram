@@ -1,6 +1,6 @@
 """Command-list menu text."""
 COMMANDS_CAPTION = (
-    "📋 *Daftar Perintah Bot:*\n\n"
+    "*Daftar Perintah Bot:*\n\n"
     "┌─ *Fitur Umum:*\n"
     "├ /start - Memulai Bot atau kembali ke menu utama\n"
     "├ /github - Lihat profil developer\n"
@@ -15,10 +15,10 @@ COMMANDS_CAPTION = (
     "├ /yt <link> - Unduh YouTube video/audio\n"
     "├ /ytm <link> - Unduh YouTube Music sebagai MP3\n"
     "└ /ig <link> - Unduh Instagram/Reels\n\n"
-    "👨‍💻 *Fitur Admin:*\n"
+    "*Fitur Admin:*\n"
     "├ /cleardrive - Kosongkan folder Google Drive\n"
     "├ /clearcache - Hapus cache lokal video/audio\n"
     "├ /uptime - Cek berapa lama bot aktif\n"
     "└ /whois <id> - Lihat info pengguna berdasarkan ID\n\n"
-    "🔖 Versi: v1.5.0 | Lamp1on-Bot"
+    "Versi: v1.5.0 | Lamp1on-Bot"
 )

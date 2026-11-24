@@ -8,8 +8,8 @@ from .media import build_ydl_base_opts, scoped_cookie_file
 
 
 def flag_for_lang(language: str) -> str:
-    flags = {"id": "🇮🇩", "en": "🇬🇧", "es": "🇪🇸"}
-    return flags.get(language, "🌐")
+    labels = {"id": "Indonesian", "en": "English", "es": "Spanish"}
+    return labels.get(language, "")
 
 
 def download_subtitle(url: str, lang: str = "id"):

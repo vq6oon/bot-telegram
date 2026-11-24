@@ -128,7 +128,7 @@ def generate_progress_bar(downloaded: int, total: int, length: int = 20) -> str:
 
 
 async def download_file_with_progress(context, url, filename, chat_id) -> bool:
-    msg = await context.bot.send_message(chat_id, text="⬇️ Downloading...")
+    msg = await context.bot.send_message(chat_id, text="Downloading...")
     try:
         with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
@@ -143,14 +143,14 @@ async def download_file_with_progress(context, url, filename, chat_id) -> bool:
                         if total > 0:
                             bar = generate_progress_bar(downloaded, total)
                             try:
-                                await msg.edit_text(f"📁 Downloading... {bar}")
+                                await msg.edit_text(f"Downloading... {bar}")
                             except Exception:
                                 pass
-        await msg.edit_text("✅ Download complete.")
+        await msg.edit_text("Download complete.")
         return True
     except Exception as e:
         logging.error("Direct download failed: %s", sanitize_error(e))
-        await msg.edit_text("❌ Download failed.")
+        await msg.edit_text("Download failed.")
         return False
 
 
