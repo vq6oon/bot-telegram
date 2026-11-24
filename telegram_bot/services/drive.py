@@ -23,8 +23,10 @@ _token_lock = threading.Lock()
 
 _REDACTIONS = [
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-._~+/]+=*"), r"\1[REDACTED]"),
-    (re.compile(r'(?i)("?(?:access_token|refresh_token|client_secret)"?\s*[:=]\s*"?)([^"\s,&}]+)'), r"\1[REDACTED]"),
+    (re.compile(r'(?i)("?(?:access_token|refresh_token|client_secret|id_token|api_key)"?\s*[:=]\s*"?)([^"\s,&}]+)'), r"\1[REDACTED]"),
+    (re.compile(r"(?i)([?&](?:key|token|access_token|refresh_token)=)([^&\s]+)"), r"\1[REDACTED]"),
     (re.compile(r"[A-Za-z]:\\[^\s'\"<>|]+"), "[LOCAL_PATH]"),
+    (re.compile(r"/(?:root|home|etc|var|tmp)/[^\s'\"<>|]+"), "[LOCAL_PATH]"),
 ]
 
 
@@ -76,7 +78,10 @@ def get_drive_service():
                     encoding="utf-8",
                 ) as f:
                     temp = Path(f.name)
-                    os.chmod(temp, 0o600)
+                    try:
+                        os.chmod(temp, 0o600)
+                    except OSError:
+                        pass
                     f.write(creds.to_json())
                     f.flush()
                     os.fsync(f.fileno())
