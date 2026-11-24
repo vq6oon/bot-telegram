@@ -82,6 +82,23 @@ class AnimeServiceTests(unittest.TestCase):
              patch.object(anime_service.subprocess, "run", side_effect=single_match_run):
             self.assertEqual(anime_service.search_anime("exact single match"), [])
 
+    def test_search_anime_strips_ani_cli_list_numbers_without_dropping_duplicates(self):
+        def numbered_run(cmd, **kwargs):
+            Path(kwargs["env"]["ANI_CLI_CAPTURE_FILE"]).write_text(
+                "1 Witch on the Holy Night\n2 Witch on the Holy Night\n3 86\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with patch.object(anime_service, "is_ani_cli_available", return_value="/usr/bin/ani-cli"), \
+             patch.object(anime_service.subprocess, "run", side_effect=numbered_run):
+            results = anime_service.search_anime("witch", max_results=5)
+
+        self.assertEqual(
+            results,
+            ["Witch on the Holy Night", "Witch on the Holy Night", "86"],
+        )
+
     def test_download_anime_passes_noninteractive_flags_and_returns_file(self):
         captured_cmd = []
 

@@ -128,12 +128,12 @@ async def download_anime_command(update: Update, context: ContextTypes.DEFAULT_T
     }
     context.bot_data[f"anime_{token}"] = session
 
-    # Fallback directly to options (-S 1) if search capture returned empty
+    # Fallback directly to options (-S 1) if search list was skipped or unavailable
     if not results:
         text, markup = _render_options_message(session, token)
         return await _safe_edit_text(
             status,
-            f"Search list unavailable; defaulting to top match (#1).\n\n{text}",
+            f"Using top match (#1).\n\n{text}",
             parse_mode="HTML",
             reply_markup=markup,
         )
@@ -188,34 +188,27 @@ async def anime_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.bot_data.pop(f"anime_{token}", None)
         return await query.edit_message_text("Cancelled.")
 
-    if action == "pick":
-        if not value.isdigit():
-            return
-        idx = int(value)
-        results = session.get("results") or []
-        if 1 <= idx <= len(results):
-            session["index"] = idx
-            session["title"] = results[idx - 1]
-        text, markup = _render_options_message(session, token)
-        return await _safe_edit_text(query.message, text, parse_mode="HTML", reply_markup=markup)
+    if action in ("pick", "audio", "qual", "step"):
+        if action == "pick":
+            if not value.isdigit():
+                return
+            idx = int(value)
+            results = session.get("results") or []
+            if 1 <= idx <= len(results):
+                session["index"] = idx
+                session["title"] = results[idx - 1]
+        elif action == "audio":
+            session["dub"] = value == "dub"
+        elif action == "qual":
+            if value in VALID_QUALITIES:
+                session["quality"] = value
+        elif action == "step":
+            try:
+                delta = int(value)
+            except ValueError:
+                return
+            session["episode"] = max(1, min(ANIME_MAX_EPISODE, session["episode"] + delta))
 
-    if action == "audio":
-        session["dub"] = value == "dub"
-        text, markup = _render_options_message(session, token)
-        return await _safe_edit_text(query.message, text, parse_mode="HTML", reply_markup=markup)
-
-    if action == "qual":
-        if value in VALID_QUALITIES:
-            session["quality"] = value
-        text, markup = _render_options_message(session, token)
-        return await _safe_edit_text(query.message, text, parse_mode="HTML", reply_markup=markup)
-
-    if action == "step":
-        try:
-            delta = int(value)
-        except ValueError:
-            return
-        session["episode"] = max(1, min(ANIME_MAX_EPISODE, session["episode"] + delta))
         text, markup = _render_options_message(session, token)
         return await _safe_edit_text(query.message, text, parse_mode="HTML", reply_markup=markup)
 
@@ -271,21 +264,16 @@ async def anime_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             )
 
         filepath, clean_name, job_dir = result
-        size = os.path.getsize(filepath)
-        if size > MAX_TELEGRAM_FILE_SIZE:
-            await _upload_and_notify_drive(
-                filepath,
-                status,
-                job_label,
-                "ANIME",
-                chat_id,
-                job_id=job_id,
-                custom_name=clean_name,
-                bot=context.bot,
-                chat_id=chat_id,
-                requester_tag=user_tag,
-                reply_to_message_id=reply_to_id,
-            )
+        drive_kwargs = {
+            "job_id": job_id,
+            "custom_name": clean_name,
+            "bot": context.bot,
+            "chat_id": chat_id,
+            "requester_tag": user_tag,
+            "reply_to_message_id": reply_to_id,
+        }
+        if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
+            await _upload_and_notify_drive(filepath, status, job_label, "ANIME", chat_id, **drive_kwargs)
         else:
             try:
                 with open(filepath, "rb") as media_file:
@@ -305,19 +293,7 @@ async def anime_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     chat_id=chat_id,
                     text="Telegram upload limit reached. Routing to Google Drive...",
                 )
-                await _upload_and_notify_drive(
-                    filepath,
-                    fallback,
-                    job_label,
-                    "ANIME",
-                    chat_id,
-                    job_id=job_id,
-                    custom_name=clean_name,
-                    bot=context.bot,
-                    chat_id=chat_id,
-                    requester_tag=user_tag,
-                    reply_to_message_id=reply_to_id,
-                )
+                await _upload_and_notify_drive(filepath, fallback, job_label, "ANIME", chat_id, **drive_kwargs)
     except AnimeCliUnavailableError:
         await _safe_edit_text(status, "Anime downloader (ani-cli) is not installed on this server.")
     except Exception as exc:

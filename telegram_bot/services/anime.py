@@ -97,18 +97,35 @@ def build_clean_anime_filename(title: str, episode: int, quality: str, extension
     return f"{safe_title} - Ep {episode} ({quality_label}){ext}"
 
 
+def _strip_ani_cli_list_numbers(lines: list[str]) -> list[str]:
+    if len(lines) < 2:
+        return lines
+    stripped: list[str] = []
+    for idx, line in enumerate(lines, start=1):
+        prefix = str(idx)
+        if not line.startswith(prefix):
+            return lines
+        rest = line[len(prefix):]
+        if not rest or rest[0] not in (" ", "\t"):
+            return lines
+        title = rest.strip()
+        if not title:
+            return lines
+        stripped.append(title)
+    return stripped
+
+
 def _clean_captured_titles(raw_text: str, max_results: int = 5) -> list[str]:
-    results: list[str] = []
-    seen: set[str] = set()
-    for line in raw_text.splitlines():
-        cleaned = _ANSI_ESCAPE_RE.sub("", line).strip()
-        if not cleaned or cleaned in seen:
-            continue
-        seen.add(cleaned)
-        results.append(cleaned)
-        if len(results) >= max_results:
-            break
-    return results
+    non_empty = [
+        cleaned
+        for line in raw_text.splitlines()
+        if (cleaned := _ANSI_ESCAPE_RE.sub("", line).strip())
+    ]
+    if not non_empty:
+        return []
+    if all(_EPISODE_ONLY_RE.match(item) for item in non_empty):
+        return non_empty[:max_results]
+    return _strip_ani_cli_list_numbers(non_empty)[:max_results]
 
 
 def _write_executable_shim(path: str, script: str) -> None:
@@ -140,6 +157,14 @@ def _build_shim_env(shim_dir: str, *, capture_fzf: bool) -> tuple[dict[str, str]
     if capture_file:
         env["ANI_CLI_CAPTURE_FILE"] = capture_file
     return env, capture_file
+
+
+def _collect_proc_output(proc) -> str:
+    return " ".join(
+        part.strip()
+        for part in (getattr(proc, "stderr", ""), getattr(proc, "stdout", ""))
+        if part
+    )
 
 
 def search_anime(query: str, max_results: int = 5) -> list[str]:
@@ -185,9 +210,7 @@ def search_anime(query: str, max_results: int = 5) -> list[str]:
                 return []
             return titles
 
-        output = " ".join(
-            part.strip() for part in (getattr(proc, "stderr", ""), getattr(proc, "stdout", "")) if part
-        )
+        output = _collect_proc_output(proc)
         if "no results found" in output.lower():
             raise AnimeNotFoundError(f"No anime found for '{query}'.")
         if output or getattr(proc, "returncode", 0) != 0:
@@ -277,7 +300,7 @@ def download_anime(
                 check=False,
             )
             if proc.returncode != 0:
-                detail = (proc.stderr or proc.stdout or "").strip()
+                detail = _collect_proc_output(proc)
                 logging.warning(
                     "[ANIME] ani-cli exited %s for '%s' ep %s: %s",
                     proc.returncode,
