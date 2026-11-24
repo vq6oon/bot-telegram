@@ -46,6 +46,56 @@ class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(os.path.exists(upload_path))
         sent_messages[0].edit_text.assert_awaited()
 
+    async def test_upload_supports_video_photo_and_topic_caption_fallback(self):
+        from types import SimpleNamespace
+
+        cases = [
+            (
+                SimpleNamespace(
+                    reply_to_message=SimpleNamespace(
+                        video=SimpleNamespace(file_id="vid-1", file_unique_id="u1", mime_type="video/mp4", file_size=1024)
+                    ),
+                    reply_text=AsyncMock(return_value=SimpleNamespace(edit_text=AsyncMock())),
+                ),
+                "vid-1",
+                "video_u1.mp4",
+            ),
+            (
+                SimpleNamespace(
+                    reply_to_message=SimpleNamespace(
+                        photo=[
+                            SimpleNamespace(file_id="p-sm", file_unique_id="s1", file_size=100),
+                            SimpleNamespace(file_id="p-lg", file_unique_id="l1", file_size=500),
+                        ]
+                    ),
+                    reply_text=AsyncMock(return_value=SimpleNamespace(edit_text=AsyncMock())),
+                ),
+                "p-lg",
+                "photo_l1.jpg",
+            ),
+            (
+                SimpleNamespace(
+                    reply_to_message=SimpleNamespace(forum_topic_created=SimpleNamespace(name="Topic")),
+                    audio=SimpleNamespace(file_id="aud-1", file_unique_id="a1", file_name="song.mp3", file_size=2048),
+                    reply_text=AsyncMock(return_value=SimpleNamespace(edit_text=AsyncMock())),
+                ),
+                "aud-1",
+                "song.mp3",
+            ),
+        ]
+
+        for message, expected_id, expected_name in cases:
+            update = SimpleNamespace(effective_message=message, effective_user=SimpleNamespace(id=42))
+            tg_file = SimpleNamespace(download_to_drive=AsyncMock())
+            bot = SimpleNamespace(get_file=AsyncMock(return_value=tg_file))
+            context = SimpleNamespace(bot=bot)
+            with patch.object(drive_handler, "DRIVE_ALLOWED_USER_IDS", frozenset({42})), \
+                 patch.object(drive_handler, "upload_to_drive", return_value="https://drive.google.com/file/d/x/view") as up, \
+                 patch.object(drive_handler, "get_user_info", return_value="test user"):
+                await drive_handler.upload(update, context)
+            bot.get_file.assert_awaited_once_with(expected_id)
+            self.assertEqual(up.call_args[0][2], expected_name)
+
 
 if __name__ == "__main__":
     unittest.main()

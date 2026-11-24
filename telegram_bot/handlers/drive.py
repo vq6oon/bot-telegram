@@ -1,7 +1,8 @@
-"""Handlers for Google Drive commands using shared upload concurrency control."""
+"""Handlers for Google Drive commands supporting all Telegram media types."""
 import asyncio
 import html
 import logging
+import mimetypes
 import os
 import tempfile
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -33,34 +34,85 @@ def _is_owner(user_id: int | None) -> bool:
     return bool(user_id and OWNER_ID > 0 and user_id == OWNER_ID)
 
 
+def _get_message(update: Update):
+    return getattr(update, "effective_message", None) or getattr(update, "message", None)
+
+
+def _guess_extension(mime_type: str | None, fallback_ext: str) -> str:
+    if mime_type:
+        guessed = mimetypes.guess_extension(mime_type)
+        if guessed:
+            return guessed
+    return fallback_ext
+
+
+def _extract_upload_media(message) -> tuple[str, str, int | None] | None:
+    """Extract (file_id, file_name, file_size) from a Telegram media attachment."""
+    if message is None:
+        return None
+
+    media_specs = (
+        ("document", "document", ""),
+        ("video", "video", ".mp4"),
+        ("audio", "audio", ".mp3"),
+        ("animation", "animation", ".mp4"),
+        ("voice", "voice", ".ogg"),
+        ("video_note", "video_note", ".mp4"),
+    )
+    for attr, prefix, default_ext in media_specs:
+        media = getattr(message, attr, None)
+        if media and getattr(media, "file_id", None):
+            unique_id = getattr(media, "file_unique_id", None) or media.file_id[:12]
+            raw_name = getattr(media, "file_name", None)
+            if raw_name:
+                file_name = raw_name
+            else:
+                ext = _guess_extension(getattr(media, "mime_type", None), default_ext)
+                file_name = f"{prefix}_{unique_id}{ext}"
+            return media.file_id, file_name, getattr(media, "file_size", None)
+
+    photos = getattr(message, "photo", None)
+    if photos:
+        best_photo = photos[-1]
+        if getattr(best_photo, "file_id", None):
+            unique_id = getattr(best_photo, "file_unique_id", None) or best_photo.file_id[:12]
+            return best_photo.file_id, f"photo_{unique_id}.jpg", getattr(best_photo, "file_size", None)
+
+    return None
+
+
 async def check_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not _authorized(update.effective_user.id):
-        if update.message:
-            await update.message.reply_text("Access denied.")
+    msg = _get_message(update)
+    user = getattr(update, "effective_user", None)
+    if not msg or not user or not _authorized(user.id):
+        if msg:
+            await msg.reply_text("Access denied.")
         return
 
     try:
         usage = await asyncio.to_thread(get_drive_usage)
-        await update.message.reply_text(f"Google Drive: {usage}")
+        await msg.reply_text(f"Google Drive: {usage}")
     except GoogleDriveAuthError as e:
-        await update.message.reply_text(f"Auth error: {e}")
+        await msg.reply_text(f"Auth error: {e}")
     except Exception as e:
         logging.error("Drive quota error: %s", sanitize_error(e))
-        await update.message.reply_text("Failed to check Drive quota.")
+        await msg.reply_text("Failed to check Drive quota.")
 
 
 async def list_drive_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not _authorized(update.effective_user.id):
-        if update.message:
-            await update.message.reply_text("Access denied.")
+    msg = _get_message(update)
+    user = getattr(update, "effective_user", None)
+    if not msg or not user or not _authorized(user.id):
+        if msg:
+            await msg.reply_text("Access denied.")
         return
 
-    msg = await update.message.reply_text("Fetching file list...")
+    status = await msg.reply_text("Fetching file list...")
     try:
         data = await asyncio.to_thread(list_drive_files_sync, DRIVE_FOLDER_ID)
         files = data.get("files", [])
         if not files:
-            return await msg.edit_text("Drive folder is empty.")
+            return await status.edit_text("Drive folder is empty.")
 
         lines = ["Recent Drive files:"]
         for f in files:
@@ -71,23 +123,25 @@ async def list_drive_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f'• <a href="{link}">{name}</a> ({size_mb})')
 
         lines.append(f"\nUsed: {data.get('usage_fmt', '')} | Free: {data.get('free_fmt', '')}")
-        await msg.edit_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+        await status.edit_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         logging.error("List files error: %s", sanitize_error(e))
-        await msg.edit_text("Failed to fetch files.")
+        await status.edit_text("Failed to fetch files.")
 
 
 async def clear_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not _is_owner(update.effective_user.id):
-        if update.message:
-            await update.message.reply_text("Access denied. Owner only.")
+    msg = _get_message(update)
+    user = getattr(update, "effective_user", None)
+    if not msg or not user or not _is_owner(user.id):
+        if msg:
+            await msg.reply_text("Access denied. Owner only.")
         return
 
     keyboard = [[
         InlineKeyboardButton("Yes, delete all", callback_data="confirm_clear_drive"),
         InlineKeyboardButton("Cancel", callback_data="cancel_clear_drive"),
     ]]
-    await update.message.reply_text("Delete all files in Google Drive?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await msg.reply_text("Delete all files in Google Drive?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def clear_drive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,22 +161,24 @@ async def clear_drive_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    user = update.effective_user
+    msg = _get_message(update)
+    user = getattr(update, "effective_user", None)
     if not msg or not user or not _authorized(user.id):
         if msg:
             await msg.reply_text("Access denied.")
         return
 
-    if not msg.reply_to_message or not msg.reply_to_message.document:
-        return await msg.reply_text("Reply to a file with /upload to send it to Google Drive.")
+    # Inspect replied message first (skipping topic service messages), then captioned media on current message.
+    media_info = _extract_upload_media(getattr(msg, "reply_to_message", None)) or _extract_upload_media(msg)
+    if not media_info:
+        return await msg.reply_text(
+            "Reply to any file, photo, video, audio, or voice message with /upload (or send media with /upload as the caption)."
+        )
 
-    doc = msg.reply_to_message.document
-    file_name = doc.file_name or f"document_{doc.file_unique_id}"
+    file_id, file_name, file_size = media_info
 
-    # Telegram bot getFile limit check
-    if getattr(doc, "file_size", None) and doc.file_size > MAX_TELEGRAM_DOWNLOAD_SIZE:
-        size_mb = doc.file_size / (1024 * 1024)
+    if file_size and file_size > MAX_TELEGRAM_DOWNLOAD_SIZE:
+        size_mb = file_size / (1024 * 1024)
         return await msg.reply_text(
             f"File is {size_mb:.1f} MB. Telegram limits bot downloads to 20 MB."
         )
@@ -132,13 +188,14 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with get_drive_upload_semaphore():
             try:
-                tg_file = await context.bot.get_file(doc.file_id)
+                tg_file = await context.bot.get_file(file_id)
             except BadRequest as e:
                 if "file is too big" in str(e).lower():
                     return await status.edit_text("File exceeds Telegram's 20 MB bot limit.")
                 raise
 
-            with tempfile.NamedTemporaryFile(prefix="tg-upload-", delete=False) as tmp:
+            suffix = os.path.splitext(file_name)[1]
+            with tempfile.NamedTemporaryFile(prefix="tg-upload-", suffix=suffix, delete=False) as tmp:
                 temp_path = tmp.name
 
             await tg_file.download_to_drive(temp_path)
