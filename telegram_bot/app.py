@@ -44,6 +44,7 @@ def build_application():
     app.add_handler(CommandHandler("yt", media.download_youtube_command))
     app.add_handler(CommandHandler("ytm", media.download_youtube_music_command))
     app.add_handler(CommandHandler("ig", media.download_instagram_command))
+    app.add_handler(CommandHandler("tt", media.download_tiktok_command))
     app.add_handler(CommandHandler("status", media.active_downloads_status))
     app.add_handler(CallbackQueryHandler(media.yt_callback_handler, pattern="^yt\\|"))
     app.add_handler(CommandHandler("id", general.get_id))
@@ -68,7 +69,6 @@ def build_application():
             pattern="^(confirm_clear_drive|cancel_clear_drive)$",
         )
     )
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, media.handle_message))
 
     if hasattr(app, "add_error_handler"):
         app.add_error_handler(_global_error_handler)

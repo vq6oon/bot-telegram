@@ -731,89 +731,82 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text or not update.effective_user:
+async def _process_tiktok_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    if not update.message or not update.effective_user:
         return
-    text = update.message.text.strip()
     user = update.effective_user
-
-    yt_url = normalize_media_url(text, "youtube")
-    if yt_url:
-        if (urlparse(yt_url).hostname or "").lower().endswith("music.youtube.com"):
-            context.args = [yt_url]
-            return await download_youtube_music_command(update, context)
-        return await offer_youtube_format(update, yt_url, context)
-
-    ig_url = normalize_media_url(text, "instagram")
-    if ig_url:
-        context.args = [ig_url]
-        return await download_instagram_command(update, context)
-
-    if "tiktok.com" in text:
-        logging.info("[TIKTOK] %s sent link: %s", _user_tag(user), text)
-        msg = await update.message.reply_text("Mendeteksi link TikTok...")
-        try:
-            r = await asyncio.to_thread(
-                requests.get, "https://tikwm.com/api/", params={"url": text}, timeout=30
-            )
-            res = r.json()
-            data = res.get("data")
-            if res.get("code") == 0 and data:
-                if data.get("images"):
-                    media_group = [
-                        InputMediaPhoto(media=img_url) for img_url in data["images"][:10]
-                    ]
-                    try:
-                        await context.bot.send_media_group(chat_id=user.id, media=media_group)
-                        logging.info("[TIKTOK] Delivered photo album to %s", user.id)
-                        await update.message.reply_text(
-                            "Album foto TikTok dikirim lewat chat pribadi Anda.",
-                            reply_to_message_id=update.message.message_id,
-                        )
-                    except Exception as e:
-                        logging.error("Failed to send TikTok album privately: %s", sanitize_error(e))
-                        await msg.edit_text("Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
-                    else:
-                        await msg.delete()
-                    return
-
-                short_id = str(uuid.uuid4())[:8]
-                context.user_data[f"tt_{short_id}"] = {
-                    "video_url": data.get("play"),
-                    "audio_url": data.get("music"),
-                    "title": data.get("title", "TikTok"),
-                    "owner_id": user.id,
-                    "chat_id": update.effective_chat.id,
-                    "source_message_id": update.message.message_id,
-                }
-
+    logging.info("[TIKTOK] %s sent link: %s", _user_tag(user), url)
+    msg = await update.message.reply_text("Mendeteksi link TikTok...")
+    try:
+        r = await asyncio.to_thread(
+            requests.get, "https://tikwm.com/api/", params={"url": url}, timeout=30
+        )
+        res = r.json()
+        data = res.get("data")
+        if res.get("code") == 0 and data:
+            if data.get("images"):
+                media_group = [
+                    InputMediaPhoto(media=img_url) for img_url in data["images"][:10]
+                ]
                 try:
-                    await context.bot.send_message(
-                        chat_id=user.id,
-                        text="Pilih format TikTok ini. Hasil hanya dikirim lewat chat pribadi Anda:",
-                        reply_markup=InlineKeyboardMarkup([
-                            [
-                                InlineKeyboardButton("Video", callback_data=f"tt|video|{short_id}"),
-                                InlineKeyboardButton("Audio", callback_data=f"tt|audio|{short_id}"),
-                            ]
-                        ]),
-                    )
+                    await context.bot.send_media_group(chat_id=user.id, media=media_group)
+                    logging.info("[TIKTOK] Delivered photo album to %s", user.id)
                     await update.message.reply_text(
-                        "Pilihan dikirim lewat chat pribadi Anda. Unduhan juga akan dikirim ke chat pribadi.",
+                        "Album foto TikTok dikirim lewat chat pribadi Anda.",
                         reply_to_message_id=update.message.message_id,
                     )
-                    logging.info("[TIKTOK] Sent format options to %s", user.id)
-                    await msg.delete()
                 except Exception as e:
-                    logging.info("TikTok private delivery unavailable: %s", sanitize_error(e))
-                    context.user_data.pop(f"tt_{short_id}", None)
+                    logging.error("Failed to send TikTok album privately: %s", sanitize_error(e))
                     await msg.edit_text("Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
+                else:
+                    await msg.delete()
                 return
 
-            await msg.edit_text("Gagal unduh TikTok: Respon tidak valid.")
-        except Exception as e:
-            logging.error("TikTok error: %s", sanitize_error(e))
-            await msg.edit_text(f"Gagal unduh TikTok: {sanitize_error(e)}")
-        return
+            short_id = str(uuid.uuid4())[:8]
+            context.user_data[f"tt_{short_id}"] = {
+                "video_url": data.get("play"),
+                "audio_url": data.get("music"),
+                "title": data.get("title", "TikTok"),
+                "owner_id": user.id,
+                "chat_id": update.effective_chat.id,
+                "source_message_id": update.message.message_id,
+            }
 
-    await update.message.reply_text("Send a YouTube, TikTok, or Instagram link.")
+            try:
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text="Pilih format TikTok ini. Hasil hanya dikirim lewat chat pribadi Anda:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("Video", callback_data=f"tt|video|{short_id}"),
+                            InlineKeyboardButton("Audio", callback_data=f"tt|audio|{short_id}"),
+                        ]
+                    ]),
+                )
+                await update.message.reply_text(
+                    "Pilihan dikirim lewat chat pribadi Anda. Unduhan juga akan dikirim ke chat pribadi.",
+                    reply_to_message_id=update.message.message_id,
+                )
+                logging.info("[TIKTOK] Sent format options to %s", user.id)
+                await msg.delete()
+            except Exception as e:
+                logging.info("TikTok private delivery unavailable: %s", sanitize_error(e))
+                context.user_data.pop(f"tt_{short_id}", None)
+                await msg.edit_text("Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
+            return
+
+        await msg.edit_text("Gagal unduh TikTok: Respon tidak valid.")
+    except Exception as e:
+        logging.error("TikTok error: %s", sanitize_error(e))
+        await msg.edit_text(f"Gagal unduh TikTok: {sanitize_error(e)}")
+
+
+async def download_tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if not context.args:
+        return await update.message.reply_text("Usage: /tt <TikTok URL>")
+    url = context.args[0].strip()
+    if "tiktok.com" not in url.lower():
+        return await update.message.reply_text("Invalid TikTok URL.")
+    await _process_tiktok_url(update, context, url)

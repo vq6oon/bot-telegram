@@ -21,10 +21,10 @@ class TikTokConcurrencyTests(unittest.TestCase):
                 async def send_video(self,**kwargs): sent.append(("delivery",kwargs)); return SimpleNamespace()
             class Response:
                 def json(self): return {"code":0,"data":{"play":"https://cdn.test/v.mp4","music":"https://cdn.test/a.mp3","title":"T"}}
-            contexts=[SimpleNamespace(user_data={},bot=Bot()),SimpleNamespace(user_data={},bot=Bot())]
+            contexts=[SimpleNamespace(user_data={},bot=Bot(),args=["https://www.tiktok.com/@x/video/123"]),SimpleNamespace(user_data={},bot=Bot(),args=["https://www.tiktok.com/@x/video/123"])]
             updates=[SimpleNamespace(message=Message(),effective_user=Message().from_user,effective_chat=SimpleNamespace(id=-1007)) for _ in range(2)]
             with patch.object(media.requests,"get",return_value=Response()):
-                await asyncio.gather(*(media.handle_message(u,c) for u,c in zip(updates,contexts)))
+                await asyncio.gather(*(media.download_tiktok_command(u,c) for u,c in zip(updates,contexts)))
             keyboard_msgs=[x for x in sent if x[0]=="private" and "Pilih format" in x[1].get("text","")]
             confirmations=[x for x in sent if x[0]=="reply" and "Pilihan dikirim" in x[1]]
             self.assertEqual(len(keyboard_msgs),2)

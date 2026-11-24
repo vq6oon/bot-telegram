@@ -22,9 +22,9 @@ class TikTokPhotoPrivacyTests(unittest.TestCase):
                 def json(self): return {"code":0,"data":{"images":["https://cdn.test/one.jpg","https://cdn.test/two.jpg"]}}
             message=Message()
             update=SimpleNamespace(message=message,effective_user=message.from_user,effective_chat=SimpleNamespace(id=-1007))
-            context=SimpleNamespace(user_data={},bot=Bot())
+            context=SimpleNamespace(user_data={},bot=Bot(),args=["https://www.tiktok.com/@user/video/123"])
             with patch.object(media.requests,"get",return_value=Response()):
-                await media.handle_message(update,context)
+                await media.download_tiktok_command(update,context)
             self.assertEqual(len([e for e in events if e[0]=="dm_album"]),1)
             self.assertEqual([e[1]["chat_id"] for e in events if e[0]=="dm_album"], [42])
             self.assertFalse(any(e[0]=="group_album" for e in events))

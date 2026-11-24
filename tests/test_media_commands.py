@@ -54,34 +54,17 @@ class MediaCommandTests(unittest.TestCase):
         self.assertEqual(FakeYDL.last_options["outtmpl"], "youtube-dump/%(id)s_%(title).80s.%(ext)s")
         self.assertTrue(FakeYDL.last_options["restrictfilenames"])
 
-    def test_group_youtube_music_link_routes_to_audio_downloader(self):
+    def test_plain_text_link_autodetect_removed_and_tt_command_requires_command(self):
         from telegram_bot.handlers import media
 
-        class Message:
-            text = "https://music.youtube.com/watch?v=abc123"
+        self.assertFalse(hasattr(media, "handle_message"))
 
-            async def reply_text(self, _text, **_kwargs):
-                return SimpleNamespace(edit_text=self.edit_text, delete=self.delete)
-
-            async def reply_audio(self, **_kwargs):
-                return None
-
-            async def edit_text(self, *_args, **_kwargs):
-                return None
-
-            async def delete(self):
-                return None
-
-        update = SimpleNamespace(
-            message=Message(),
-            effective_user=SimpleNamespace(username=None, first_name="Test", id=1),
-            effective_chat=SimpleNamespace(id=1),
-        )
-        with patch.object(media, "download_youtube", return_value=None) as download:
-            asyncio.run(media.handle_message(update, SimpleNamespace()))
-        download.assert_called_once_with(
-            "https://music.youtube.com/watch?v=abc123", mode="audio", music=True
-        )
+        update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+        with patch.object(media, "_process_tiktok_url", new=AsyncMock()) as tt_mock:
+            asyncio.run(media.download_tiktok_command(update, SimpleNamespace(args=[])))
+            tt_mock.assert_not_awaited()
+            asyncio.run(media.download_tiktok_command(update, SimpleNamespace(args=["https://www.tiktok.com/@u/video/1"])))
+            tt_mock.assert_awaited_once()
 
     def test_yt_command_validates_url_and_opens_format_picker(self):
         from telegram_bot.handlers import media
