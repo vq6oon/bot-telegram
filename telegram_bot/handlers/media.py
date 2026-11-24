@@ -17,6 +17,7 @@ from ..services.job_tracker import (
     format_active_jobs,
     get_download_semaphore,
     remove_job,
+    snapshot,
     update_job,
 )
 from ..services.media import download_youtube, extract_youtube_info, normalize_media_url
@@ -36,30 +37,69 @@ async def active_downloads_status(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def offer_youtube_format(update: Update, url: str, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    info = await asyncio.to_thread(extract_youtube_info, url)
-    title = info.get("title", "YouTube Video")
+    if not update.message or not update.effective_user:
+        return
 
-    token = uuid.uuid4().hex[:8]
+    owner_id = update.effective_user.id
+    token = uuid.uuid4().hex[:12]
+
+    try:
+        info = await asyncio.to_thread(extract_youtube_info, url)
+    except Exception as e:
+        err_text = sanitize_error(e)
+        logging.error("Failed to fetch YouTube metadata: %s", err_text)
+        if "sign in to confirm" in str(e).lower() or "not a bot" in str(e).lower():
+            await update.message.reply_text(
+                "⚠️ YouTube requires valid authentication cookies on the server. "
+                "Please refresh <code>cookies.txt</code> and try again.",
+                parse_mode="HTML",
+            )
+            return
+        await update.message.reply_text("Failed to fetch video information. Please try again.")
+        return
+
+    if not info:
+        await update.message.reply_text("Could not find video information for this link.")
+        return
+
+    title = info.get("title") or "YouTube Video"
+    video_id = info.get("id") or ""
+    subtitle_langs = list((info.get("subtitles") or {}).keys())
+
     context.bot_data[f"yt_{token}"] = {
         "url": url,
-        "owner_id": user.id if user else None,
+        "owner_id": owner_id,
         "title": title,
+        "video_id": video_id,
+        "created_at": time.time(),
     }
+
+    preferred_langs = ["id", "en", "es"]
+    available_langs = [lang for lang in preferred_langs if lang in subtitle_langs]
 
     keyboard = [
         [
             InlineKeyboardButton("360p", callback_data=f"yt|video|360|{token}"),
             InlineKeyboardButton("720p", callback_data=f"yt|video|720|{token}"),
             InlineKeyboardButton("1080p", callback_data=f"yt|video|1080|{token}"),
-        ],
-        [
-            InlineKeyboardButton("MP3", callback_data=f"yt|audio||{token}"),
-            InlineKeyboardButton("Cancel", callback_data=f"yt|cancel||{token}"),
         ]
     ]
+    row = [InlineKeyboardButton("MP3", callback_data=f"yt|audio||{token}")]
+    if available_langs:
+        row.append(InlineKeyboardButton("Subtitle", callback_data=f"yt|submenu||{token}"))
+    row.append(InlineKeyboardButton("Cancel", callback_data=f"yt|cancel||{token}"))
+    keyboard.append(row)
+
+    active_count = len(snapshot())
+    stack_note = (
+        f"\n\nActive downloads: <b>{active_count}</b> (use <code>/status</code> to inspect)"
+        if active_count
+        else ""
+    )
+
     await update.message.reply_text(
-        f"Select format for:\n<b>{title}</b>",
+        f"<b>{html.escape(title)}</b>\n"
+        f"Select format (locked to {_user_tag(update.effective_user)}):{stack_note}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -89,6 +129,55 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if mode == "cancel":
         context.bot_data.pop(f"yt_{token}", None)
         return await query.edit_message_text("Cancelled.")
+
+    if mode == "submenu":
+        url = session["url"]
+        try:
+            info = await asyncio.to_thread(extract_youtube_info, url)
+            subtitles = info.get("subtitles") or {}
+        except Exception:
+            subtitles = {}
+
+        langs = [l for l in ["id", "en", "es"] if l in subtitles]
+        if not langs:
+            return await query.edit_message_text("No subtitles available for this video.")
+
+        buttons = [
+            InlineKeyboardButton(f"{flag_for_lang(l)} {l.upper()}", callback_data=f"yt|sub|{l}|{token}")
+            for l in langs
+        ]
+        rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+        rows.append([InlineKeyboardButton("Cancel", callback_data=f"yt|cancel||{token}")])
+        return await query.edit_message_text("Select subtitle language:", reply_markup=InlineKeyboardMarkup(rows))
+
+    if mode == "sub":
+        url = session["url"]
+        context.bot_data.pop(f"yt_{token}", None)
+        lang = resolution or "id"
+        status = await query.edit_message_text("Downloading subtitle...")
+        result = await asyncio.to_thread(download_subtitle, url, lang=lang)
+        if not result:
+            return await status.edit_text("Failed to download subtitle.")
+
+        sub_path, sub_title = result
+        try:
+            with open(sub_path, "rb") as f:
+                await status.delete()
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=InputFile(f, filename=os.path.basename(sub_path)),
+                    caption=f"Subtitle ({lang.upper()}): {sub_title}",
+                )
+        except Exception as e:
+            logging.error("Failed to send subtitle: %s", sanitize_error(e))
+            await status.edit_text("Failed to send subtitle.")
+        finally:
+            if os.path.exists(sub_path):
+                try:
+                    os.remove(sub_path)
+                except OSError:
+                    pass
+        return
 
     context.bot_data.pop(f"yt_{token}", None)
     url = session["url"]
