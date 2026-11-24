@@ -2,9 +2,11 @@
 import os
 from pathlib import Path
 
+BASE_DIR = Path(__file__).resolve().parents[1]
+
 
 def _load_env():
-    env_file = Path(__file__).resolve().parents[1] / ".env"
+    env_file = BASE_DIR / ".env"
     if not env_file.is_file():
         return
     for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -60,16 +62,21 @@ DRIVE_UPLOAD_CHUNK_BYTES = max(1, _int_env("DRIVE_UPLOAD_CHUNK_SIZE_MB", 8)) * 1
 MAX_CONCURRENT_DOWNLOADS = max(1, _int_env("MAX_CONCURRENT_DOWNLOADS", 3))
 DOWNLOAD_RATELIMIT_BYTES = _int_env("DOWNLOAD_RATELIMIT_KBPS", 0) * 1024
 
+# YouTube cookies for yt-dlp
+_custom_cookies = os.environ.get("YTDLP_COOKIES_FILE", "").strip() or os.environ.get("COOKIE_FILE_PATH", "").strip()
+YTDLP_COOKIES_FILE = Path(_custom_cookies) if _custom_cookies else (BASE_DIR / "cookies.txt")
+
 
 def get_cookie_file() -> str | None:
-    custom = os.environ.get("COOKIE_FILE_PATH", "").strip()
-    if custom:
-        p = Path(custom)
-        if p.is_file() and p.stat().st_size > 0:
-            return str(p.resolve())
-    root_cookie = Path(__file__).resolve().parents[1] / "cookies.txt"
-    if root_cookie.is_file() and root_cookie.stat().st_size > 0:
-        return str(root_cookie.resolve())
+    env_cookie = os.environ.get("YTDLP_COOKIES_FILE", "").strip() or os.environ.get("COOKIE_FILE_PATH", "").strip()
+    candidate = Path(env_cookie) if env_cookie else YTDLP_COOKIES_FILE
+    if not candidate.is_absolute():
+        candidate = BASE_DIR / candidate
+    try:
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return str(candidate.resolve())
+    except OSError:
+        pass
     cwd_cookie = Path.cwd() / "cookies.txt"
     if cwd_cookie.is_file() and cwd_cookie.stat().st_size > 0:
         return str(cwd_cookie.resolve())

@@ -2,6 +2,7 @@
 cookies.txt
 /cookies.txt
 *.cookies.txt
+*cookies*.txt
 credentials.json
 /credentials.json
 token.json
