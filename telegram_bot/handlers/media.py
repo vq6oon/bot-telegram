@@ -39,6 +39,7 @@ from ..services.media import (
 )
 from ..services.subtitles import download_subtitle, flag_for_lang
 from ..services.tiktok import download_tiktok_file, is_tiktok_owner
+from .drive import deliver_fresh_message
 
 
 def _user_tag(user) -> str:
@@ -139,6 +140,10 @@ async def _upload_and_notify_drive(
     job_id: str | None = None,
     app_properties: dict[str, str] | None = None,
     custom_name: str | None = None,
+    bot=None,
+    chat_id: int | str | None = None,
+    requester_tag: str | None = None,
+    reply_to_message_id: int | None = None,
 ) -> str:
     link = await _upload_to_drive_guarded(
         filepath,
@@ -148,8 +153,15 @@ async def _upload_and_notify_drive(
         app_properties=app_properties,
         custom_name=custom_name,
     )
-    await _safe_edit_text(
-        status_msg, f"Saved to Google Drive:\n{link}", disable_web_page_preview=True
+    label = custom_name or title
+    header = f"Done ({requester_tag}): {label}" if requester_tag else f"Done: {label}"
+    text = f"{header}\nSaved to Google Drive:\n{link}"
+    await deliver_fresh_message(
+        status_msg,
+        text,
+        bot=bot,
+        chat_id=chat_id,
+        reply_to_message_id=reply_to_message_id,
     )
     logging.info("[%s] Uploaded to Drive for %s: %s (%s)", log_tag, target_id, title, link)
     return link
@@ -199,6 +211,7 @@ async def offer_youtube_format(update: Update, url: str, context: ContextTypes.D
         "title": title,
         "video_id": video_id,
         "max_height": max_height,
+        "source_message_id": getattr(update.message, "message_id", None),
         "created_at": time.time(),
     }
 
@@ -430,6 +443,10 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 job_id=job_id,
                 app_properties=yt_props,
                 custom_name=display_name,
+                bot=context.bot,
+                chat_id=query.message.chat_id,
+                requester_tag=user_tag,
+                reply_to_message_id=session.get("source_message_id"),
             )
         else:
             try:
@@ -466,6 +483,10 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     job_id=job_id,
                     app_properties=yt_props,
                     custom_name=display_name,
+                    bot=context.bot,
+                    chat_id=query.message.chat_id,
+                    requester_tag=user_tag,
+                    reply_to_message_id=session.get("source_message_id"),
                 )
     except Exception as e:
         logging.error("Processing error: %s", sanitize_error(e))
@@ -513,7 +534,16 @@ async def download_youtube_music_command(update: Update, context: ContextTypes.D
         display_name = format_youtube_filename(title, mode="audio", ext=ext)
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
             await _upload_and_notify_drive(
-                filepath, status, title, "YTM", f"chat {chat_id}", custom_name=display_name
+                filepath,
+                status,
+                title,
+                "YTM",
+                f"chat {chat_id}",
+                custom_name=display_name,
+                bot=context.bot,
+                chat_id=getattr(update.message, "chat_id", None),
+                requester_tag=_safe_user(update),
+                reply_to_message_id=getattr(update.message, "message_id", None),
             )
         else:
             with open(filepath, "rb") as f:
@@ -566,7 +596,17 @@ async def download_instagram_command(update: Update, context: ContextTypes.DEFAU
             filepath = os.path.splitext(filepath)[0] + ".mp4"
 
         if os.path.getsize(filepath) > MAX_TELEGRAM_FILE_SIZE:
-            await _upload_and_notify_drive(filepath, status, title, "IG", f"chat {chat_id}")
+            await _upload_and_notify_drive(
+                filepath,
+                status,
+                title,
+                "IG",
+                f"chat {chat_id}",
+                bot=context.bot,
+                chat_id=getattr(update.message, "chat_id", None),
+                requester_tag=_safe_user(update),
+                reply_to_message_id=getattr(update.message, "message_id", None),
+            )
         else:
             with open(filepath, "rb") as f:
                 await status.delete()
@@ -614,7 +654,14 @@ async def tiktok_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         filename = await asyncio.to_thread(download_tiktok_file, url, ext)
         if os.path.getsize(filename) > MAX_TELEGRAM_FILE_SIZE:
             await _upload_and_notify_drive(
-                filename, status, data.get("title", "TikTok"), "TIKTOK", f"user {user_id}"
+                filename,
+                status,
+                data.get("title", "TikTok"),
+                "TIKTOK",
+                f"user {user_id}",
+                bot=context.bot,
+                chat_id=user_id,
+                requester_tag=_user_tag(query.from_user),
             )
         else:
             with open(filename, "rb") as f:

@@ -174,22 +174,25 @@ class MediaCommandTests(unittest.TestCase):
             temp_path = tmp.name
 
         try:
+            status_msg = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
             query = SimpleNamespace(
                 data="yt|video|720|tok2",
                 from_user=SimpleNamespace(id=42, username="tester", first_name="Tester"),
                 message=SimpleNamespace(chat_id=99),
                 answer=AsyncMock(),
-                edit_message_text=AsyncMock(return_value=SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())),
+                edit_message_text=AsyncMock(return_value=status_msg),
             )
             update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
+            bot = SimpleNamespace(send_message=AsyncMock())
             context = SimpleNamespace(
-                bot=SimpleNamespace(send_message=AsyncMock()),
+                bot=bot,
                 bot_data={
                     "yt_tok2": {
                         "url": "https://youtu.be/abc123",
                         "owner_id": 42,
                         "title": "Big/Clip",
                         "video_id": "abc123",
+                        "source_message_id": 55,
                     }
                 },
             )
@@ -200,6 +203,13 @@ class MediaCommandTests(unittest.TestCase):
                 asyncio.run(media.yt_callback_handler(update, context))
 
             self.assertEqual(up.call_args[0][2], "Big Clip (720p).mp4")
+            bot.send_message.assert_awaited_once()
+            sent_kwargs = bot.send_message.call_args.kwargs
+            self.assertEqual(sent_kwargs["chat_id"], 99)
+            self.assertEqual(sent_kwargs["reply_to_message_id"], 55)
+            self.assertIn("Done (@tester): Big Clip (720p).mp4", sent_kwargs["text"])
+            self.assertIn("Saved to Google Drive:\nhttps://drive.google.com/file/d/x/view", sent_kwargs["text"])
+            status_msg.delete.assert_awaited_once()
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

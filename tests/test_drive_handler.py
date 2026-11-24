@@ -132,6 +132,36 @@ class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
         miss_msg.reply_text.assert_awaited_once()
         self.assertTrue(any("[UPLOAD]" in line and "reply=[story]" in line for line in logs.output))
 
+    async def test_upload_sends_fresh_message_and_deletes_stale_status_when_supported(self):
+        from types import SimpleNamespace
+
+        status_msg = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
+        msg = SimpleNamespace(
+            chat_id=-1001,
+            message_id=77,
+            reply_to_message=SimpleNamespace(
+                document=SimpleNamespace(file_id="f-1", file_name="note.txt", file_unique_id="u1", file_size=50)
+            ),
+            reply_text=AsyncMock(return_value=status_msg),
+        )
+        update = SimpleNamespace(effective_message=msg, effective_user=SimpleNamespace(id=42))
+        tg_file = SimpleNamespace(download_to_drive=AsyncMock())
+        bot = SimpleNamespace(get_file=AsyncMock(return_value=tg_file), send_message=AsyncMock())
+        context = SimpleNamespace(bot=bot)
+
+        with patch.object(drive_handler, "DRIVE_ALLOWED_USER_IDS", frozenset({42})), \
+             patch.object(drive_handler, "upload_to_drive", return_value="https://drive.google.com/file/d/id1/view"), \
+             patch.object(drive_handler, "get_user_info", return_value="test user"):
+            await drive_handler.upload(update, context)
+
+        bot.send_message.assert_awaited_once()
+        kwargs = bot.send_message.call_args.kwargs
+        self.assertEqual(kwargs["chat_id"], -1001)
+        self.assertEqual(kwargs["reply_to_message_id"], 77)
+        self.assertIn("Uploaded: note.txt", kwargs["text"])
+        self.assertIn("https://drive.google.com/file/d/id1/view", kwargs["text"])
+        status_msg.delete.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

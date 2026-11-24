@@ -6,7 +6,7 @@ import mimetypes
 import os
 import tempfile
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 from ..config import (
     DRIVE_ALLOWED_USER_IDS,
@@ -102,6 +102,56 @@ def _extract_upload_media(message) -> tuple[str, str, int | None] | None:
             return best_photo.file_id, f"photo_{unique_id}.jpg", getattr(best_photo, "file_size", None)
 
     return None
+
+
+async def deliver_fresh_message(
+    status_msg,
+    text: str,
+    *,
+    bot=None,
+    chat_id: int | str | None = None,
+    reply_to_message_id: int | None = None,
+) -> None:
+    """Send result as a new message and remove stale progress status, falling back to edit."""
+    target_chat = chat_id if chat_id is not None else getattr(status_msg, "chat_id", None)
+    sender = bot if (bot is not None and hasattr(bot, "send_message")) else None
+    if sender is None:
+        chat = getattr(status_msg, "chat", None)
+        if chat is not None and hasattr(chat, "send_message"):
+            sender = chat
+            if target_chat is None:
+                target_chat = getattr(chat, "id", None)
+
+    if sender is not None and (target_chat is not None or sender is getattr(status_msg, "chat", None)):
+        kwargs: dict = {"disable_web_page_preview": True}
+        thread_id = getattr(status_msg, "message_thread_id", None)
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        if reply_to_message_id is not None:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+            kwargs["allow_sending_without_reply"] = True
+
+        try:
+            if sender is bot:
+                await sender.send_message(chat_id=target_chat, text=text, **kwargs)
+            else:
+                await sender.send_message(text=text, **kwargs)
+            delete_fn = getattr(status_msg, "delete", None)
+            if callable(delete_fn):
+                try:
+                    await delete_fn()
+                except TelegramError:
+                    pass
+            return
+        except TelegramError:
+            pass
+
+    edit_fn = getattr(status_msg, "edit_text", None)
+    if callable(edit_fn):
+        try:
+            await edit_fn(text, disable_web_page_preview=True)
+        except TelegramError:
+            pass
 
 
 async def check_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,7 +291,13 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             link = await asyncio.to_thread(upload_to_drive, temp_path, DRIVE_FOLDER_ID, file_name)
 
         logging.info("[UPLOAD] %s uploaded: %s", get_user_info(user), file_name)
-        await status.edit_text(f"Uploaded: {link}", disable_web_page_preview=True)
+        await deliver_fresh_message(
+            status,
+            f"Uploaded: {file_name}\n{link}",
+            bot=getattr(context, "bot", None),
+            chat_id=getattr(msg, "chat_id", None),
+            reply_to_message_id=getattr(msg, "message_id", None),
+        )
     except Exception as e:
         logging.error("Upload failed: %s", sanitize_error(e))
         await status.edit_text("Upload failed.")
