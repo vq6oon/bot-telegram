@@ -23,10 +23,10 @@ async def handle_laporan_balasan(update: Update, context: ContextTypes.DEFAULT_T
             f"📝 Pesan:\n{isi_laporan}"
         )
 
-        # ⏳ Beri tahu user bahwa laporan sedang dikirim
+        # Notify user that report is being sent
         status_msg = await update.message.reply_text("⏳ Mengirim laporan kamu ke admin...")
 
-        # 🪵 Log ke terminal
+        # Log report details to terminal
         logging.info(f"[LAPOR] Dari {user_info}: {isi_laporan}")
 
         try:

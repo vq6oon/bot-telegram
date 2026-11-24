@@ -32,7 +32,7 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await msg.reply_text("📥 Mengunduh video...")
 
-    # 🔄 Simulasi progress bar (bukan real), karena download_to_drive tidak support streaming
+    # Simulated progress updates (download_to_drive does not stream)
     for i in range(0, 101, 20):
         try:
             bar = "█" * (i // 5) + "░" * ((100 - i) // 5)
@@ -44,7 +44,7 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await file.download_to_drive(input_path)
 
-        # 🎵 Konversi pakai ffmpeg
+        # Convert to audio via ffmpeg
         await status_msg.edit_text("🔄 Mengonversi ke audio...")
         subprocess.run(
             ["ffmpeg", "-y", "-i", input_path, output_path],
@@ -251,8 +251,8 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         size = os.path.getsize(filepath)
         if size > MAX_TELEGRAM_FILE_SIZE:
             await msg.edit_text("⏳ Ukuran file >50MB, mengunggah ke Google Drive...", disable_web_page_preview=True)
-            link = upload_to_drive(filepath)
-            space = get_drive_usage()
+            link = await asyncio.to_thread(upload_to_drive, filepath)
+            space = await asyncio.to_thread(get_drive_usage)
         else:
             with open(filepath, "rb") as f:
                 await msg.delete()
@@ -264,8 +264,8 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     return
                 except telegram.error.TimedOut:
                     warn_msg = await context.bot.send_message(chat_id=query.message.chat_id, text="⚠️ Gagal kirim file ke Telegram. File terlalu besar atau koneksi lambat, mengunggah ke Google Drive...")
-                    link = upload_to_drive(filepath)
-                    space = get_drive_usage()
+                    link = await asyncio.to_thread(upload_to_drive, filepath)
+                    space = await asyncio.to_thread(get_drive_usage)
                     await warn_msg.delete()
 
         filename = os.path.basename(filepath)
@@ -411,7 +411,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Each update is handled independently; no global/user cooldown.
 
-    # ✅ Log semua link http/https yang dikirim
+    # Log all incoming http/https links
     if text.startswith("http"):
         logging.info(f"[Link] Dari @{user.username or '-'} ({user.first_name} / {user.id}): {text}")
 
@@ -462,7 +462,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if data.get("images"):
                     await msg.edit_text("📸 Deteksi slide foto, mengirim...")
 
-                    # Siapkan list foto untuk dikirim dalam 1 grup
+                    # Group photos into a media group
                     media_group = [
                         InputMediaPhoto(media=url) for url in data["images"][:10]
                     ]
@@ -480,7 +480,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await msg.delete()
                     return
 
-                # Simpan data ke context
+                # Save metadata to context
                 short_id = str(uuid.uuid4())[:8]
                 context.user_data[f"tt_{short_id}"] = {
                     "video_url": data.get("play"),

@@ -10,15 +10,15 @@ async def scrape_ig_video(url: str) -> tuple[str, str] | None:
             print(f"🔍 Membuka: {url}")
             await page.goto(url, timeout=20000)
 
-            # Ambil video
+            # Locate video element
             await page.wait_for_selector("video", timeout=15000)
             video = await page.query_selector("video")
             video_url = await video.get_attribute("src") if video else None
 
-            # Cari caption
+            # Extract caption
             caption = ""
             possible_selectors = [
-                'ul li div > div > div > span',  # fallback umum, sering berhasil
+                'ul li div > div > div > span',  # common fallback selector
                 'div._aacl._aaco._aacu._aacx._aad7 > span',
                 'div._a9zs > span',
             ]
