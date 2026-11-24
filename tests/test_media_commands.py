@@ -204,6 +204,104 @@ class MediaCommandTests(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_extract_available_resolutions_filters_unavailable_tiers(self):
+        self.assertEqual(
+            media_service.extract_available_resolutions({
+                "formats": [
+                    {"vcodec": "none", "height": None},
+                    {"ext": "mhtml", "protocol": "mhtml", "width": 160, "height": 90},
+                    {"vcodec": "avc1", "width": 640, "height": 360},
+                    {"vcodec": "avc1", "width": 854, "height": 480},
+                ]
+            }),
+            [360, 480],
+        )
+        self.assertEqual(
+            media_service.extract_available_resolutions({
+                "formats": [
+                    {"vcodec": "avc1", "width": 640, "height": 360},
+                    {"vcodec": "avc1", "width": 854, "height": 480},
+                    {"vcodec": "avc1", "width": 1280, "height": 720},
+                ]
+            }),
+            [360, 720],
+        )
+        self.assertEqual(
+            media_service.extract_available_resolutions({
+                "formats": [{"vcodec": "avc1", "width": 1080, "height": 1920}]
+            }),
+            [1080],
+        )
+        self.assertEqual(
+            media_service.extract_available_resolutions({
+                "formats": [{"vcodec": "avc1", "width": 426, "height": 240}]
+            }),
+            [240],
+        )
+
+    def test_offer_youtube_format_only_lists_available_resolutions(self):
+        from telegram_bot.handlers import media
+
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(message=message, effective_user=SimpleNamespace(id=42, username="tester", first_name="Tester"))
+        context = SimpleNamespace(bot_data={})
+        fake_info = {
+            "id": "vid720",
+            "title": "720p Only Video",
+            "formats": [
+                {"vcodec": "avc1", "width": 640, "height": 360},
+                {"vcodec": "avc1", "width": 1280, "height": 720},
+            ],
+        }
+        with patch.object(media, "extract_youtube_info", return_value=fake_info):
+            asyncio.run(media.offer_youtube_format(update, "https://youtu.be/vid720", context))
+
+        markup = message.reply_text.call_args.kwargs["reply_markup"]
+        labels = [btn.text for btn in markup.inline_keyboard[0]]
+        self.assertEqual(labels, ["360p", "720p"])
+
+    def test_yt_callback_uses_probed_resolution_on_fallback(self):
+        import tempfile
+        from telegram_bot.handlers import media
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(b"fallback-bytes")
+            temp_path = tmp.name
+
+        try:
+            query = SimpleNamespace(
+                data="yt|video|720|tok3",
+                from_user=SimpleNamespace(id=42, username="tester", first_name="Tester"),
+                message=SimpleNamespace(chat_id=99),
+                answer=AsyncMock(),
+                edit_message_text=AsyncMock(return_value=SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())),
+            )
+            update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
+            context = SimpleNamespace(
+                bot=SimpleNamespace(send_message=AsyncMock()),
+                bot_data={
+                    "yt_tok3": {
+                        "url": "https://youtu.be/abc123",
+                        "owner_id": 42,
+                        "title": "Fallback Clip",
+                        "video_id": "abc123",
+                        "max_height": 720,
+                    }
+                },
+            )
+            with patch.object(media, "find_cached_youtube_file", return_value=None), \
+                 patch.object(media, "download_youtube", return_value=(temp_path, "Fallback Clip")), \
+                 patch.object(media, "probe_video_resolution", return_value=480), \
+                 patch.object(media, "MAX_TELEGRAM_FILE_SIZE", 1), \
+                 patch.object(media, "upload_to_drive", return_value="https://drive.google.com/file/d/x/view") as up:
+                asyncio.run(media.yt_callback_handler(update, context))
+
+            self.assertEqual(up.call_args[0][2], "Fallback Clip (480p).mp4")
+            self.assertEqual(up.call_args[0][4]["yt_res"], "480")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
 
 if __name__ == "__main__":
     unittest.main()

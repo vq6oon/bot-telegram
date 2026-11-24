@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -183,6 +184,98 @@ def format_youtube_filename(
         return f"{cleaned} ({res_label}).{clean_ext}"
 
     return f"{cleaned}.{clean_ext}"
+
+
+YOUTUBE_RESOLUTION_TIERS = (360, 480, 720, 1080)
+_TIER_LONG_EDGE = (
+    (1080, 1900),
+    (720, 1260),
+    (480, 840),
+    (360, 620),
+)
+
+
+def _format_effective_height(fmt: dict) -> int | None:
+    if not isinstance(fmt, dict):
+        return None
+    if fmt.get("vcodec") == "none" or fmt.get("ext") == "mhtml" or fmt.get("protocol") == "mhtml":
+        return None
+    height = fmt.get("height")
+    width = fmt.get("width")
+    if not isinstance(height, (int, float)) or height <= 0:
+        return None
+    h = int(height)
+    if isinstance(width, (int, float)) and width > 0:
+        w = int(width)
+        short_edge = min(w, h)
+        long_edge = max(w, h)
+        for tier, min_long in _TIER_LONG_EDGE:
+            if short_edge >= tier or (long_edge >= min_long and short_edge > tier // 2):
+                return max(short_edge, tier) if short_edge >= tier else tier
+        return short_edge
+    return h
+
+
+def extract_available_resolutions(info: dict | None) -> list[int]:
+    """Return sorted YouTube video resolution tiers available in yt-dlp metadata."""
+    if not isinstance(info, dict):
+        return []
+
+    formats = info.get("formats") or []
+    heights = {h for fmt in formats if (h := _format_effective_height(fmt)) is not None}
+    if not heights:
+        top = _format_effective_height(info)
+        if top:
+            heights = {top}
+    if not heights:
+        return []
+
+    max_height = max(heights)
+    available = [tier for tier in YOUTUBE_RESOLUTION_TIERS if tier in heights]
+    if available:
+        if max_height >= 720 and 480 in available and len(available) > 2:
+            return [t for t in available if t != 480]
+        return available
+
+    if max_height < YOUTUBE_RESOLUTION_TIERS[0]:
+        return [max_height]
+    return [tier for tier in YOUTUBE_RESOLUTION_TIERS if tier <= max_height] or [max_height]
+
+
+def probe_video_resolution(filepath: str) -> int | None:
+    """Inspect downloaded video stream resolution via ffprobe, returning None on error."""
+    if not filepath or not os.path.isfile(filepath):
+        return None
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=s=x:p=0",
+                filepath,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        lines = (proc.stdout or "").strip().splitlines()
+        line = lines[0] if lines else ""
+        if "x" not in line:
+            return None
+        w_str, h_str = line.split("x", 1)
+        return _format_effective_height({"width": int(w_str), "height": int(h_str)})
+    except Exception:
+        return None
 
 
 def _build_video_format_selector(resolution: str | None) -> tuple[str, list[str]]:

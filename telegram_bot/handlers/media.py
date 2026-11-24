@@ -31,9 +31,11 @@ from ..services.job_tracker import (
 )
 from ..services.media import (
     download_youtube,
+    extract_available_resolutions,
     extract_youtube_info,
     format_youtube_filename,
     normalize_media_url,
+    probe_video_resolution,
 )
 from ..services.subtitles import download_subtitle, flag_for_lang
 from ..services.tiktok import download_tiktok_file, is_tiktok_owner
@@ -188,25 +190,30 @@ async def offer_youtube_format(update: Update, url: str, context: ContextTypes.D
     title = info.get("title") or "YouTube Video"
     video_id = info.get("id") or ""
     subtitle_langs = list((info.get("subtitles") or {}).keys())
+    resolutions = extract_available_resolutions(info)
+    max_height = max(resolutions) if resolutions else None
 
     context.bot_data[f"yt_{token}"] = {
         "url": url,
         "owner_id": owner_id,
         "title": title,
         "video_id": video_id,
+        "max_height": max_height,
         "created_at": time.time(),
     }
 
     preferred_langs = ["id", "en", "es"]
     available_langs = [lang for lang in preferred_langs if lang in subtitle_langs]
 
-    keyboard = [
-        [
-            InlineKeyboardButton("360p", callback_data=f"yt|video|360|{token}"),
-            InlineKeyboardButton("720p", callback_data=f"yt|video|720|{token}"),
-            InlineKeyboardButton("1080p", callback_data=f"yt|video|1080|{token}"),
+    if resolutions:
+        video_buttons = [
+            InlineKeyboardButton(f"{res}p", callback_data=f"yt|video|{res}|{token}")
+            for res in resolutions
         ]
-    ]
+    else:
+        video_buttons = [InlineKeyboardButton("Best", callback_data=f"yt|video||{token}")]
+
+    keyboard = [video_buttons]
     row = [InlineKeyboardButton("MP3", callback_data=f"yt|audio||{token}")]
     if available_langs:
         row.append(InlineKeyboardButton("Subtitle", callback_data=f"yt|submenu||{token}"))
@@ -326,6 +333,9 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     url = session["url"]
     title = session["title"]
     video_id = session.get("video_id") or ""
+    max_height = session.get("max_height")
+    if mode == "video" and resolution and resolution.isdigit() and max_height and int(resolution) > max_height:
+        resolution = str(max_height)
     user_tag = _user_tag(update.effective_user)
 
     if video_id:
@@ -393,11 +403,19 @@ async def yt_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             filepath, final_title = result
 
+        actual_res = resolution or None
+        if mode == "video":
+            probed_res = await asyncio.to_thread(probe_video_resolution, filepath)
+            if probed_res:
+                actual_res = str(probed_res)
+                if video_id:
+                    yt_props = build_youtube_app_properties(video_id, mode, actual_res)
+
         ext = os.path.splitext(filepath)[1].lstrip(".") or None
         display_name = format_youtube_filename(
             final_title,
             mode=mode,
-            resolution=resolution or None,
+            resolution=actual_res,
             ext=ext,
         )
 
