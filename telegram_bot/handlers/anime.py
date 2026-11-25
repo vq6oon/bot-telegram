@@ -16,9 +16,10 @@ from ..services.anime import (
     AnimeNotFoundError,
     VALID_QUALITIES,
     download_anime,
+    fetch_anime_episodes,
     is_ani_cli_available,
     parse_anime_command_args,
-    search_anime,
+    search_anime_with_episodes,
 )
 from ..services.drive import sanitize_error
 from ..services.job_tracker import (
@@ -37,6 +38,8 @@ def _render_options_message(session: dict, token: str) -> tuple[str, InlineKeybo
     q = session["quality"]
     qual_label = "Best" if q == "best" else f"{q}p"
     ep = session["episode"]
+    total_ep = session.get("total_episodes")
+    total_line = f"Total Episodes: <b>{total_ep}</b>\n" if total_ep else ""
     owner_tag = html.escape(session["owner_tag"])
 
     active_count = len(snapshot())
@@ -48,6 +51,7 @@ def _render_options_message(session: dict, token: str) -> tuple[str, InlineKeybo
 
     text = (
         f"<b>{title}</b>\n"
+        f"{total_line}"
         f"Audio: <b>{audio_label}</b> | Quality: <b>{qual_label}</b> | Episode: <b>{ep}</b>\n"
         f"Controls locked to {owner_tag}.{stack_note}"
     )
@@ -82,6 +86,17 @@ def _render_options_message(session: dict, token: str) -> tuple[str, InlineKeybo
     return text, InlineKeyboardMarkup(keyboard)
 
 
+async def _refresh_episode_count(session: dict) -> None:
+    cache = session.setdefault("ep_cache", {})
+    key = (session["index"], bool(session["dub"]))
+    if key not in cache:
+        eps = await asyncio.to_thread(fetch_anime_episodes, session["query"], session["index"], session["dub"])
+        cache[key] = max(eps) if eps else None
+    session["total_episodes"] = cache[key]
+    max_ep = session["total_episodes"] or ANIME_MAX_EPISODE
+    session["episode"] = max(1, min(max_ep, session["episode"]))
+
+
 async def download_anime_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_user:
         return
@@ -101,7 +116,7 @@ async def download_anime_command(update: Update, context: ContextTypes.DEFAULT_T
     status = await update.message.reply_text(f"Searching anime: {query}...")
 
     try:
-        results = await asyncio.to_thread(search_anime, query, 5)
+        results = await asyncio.to_thread(search_anime_with_episodes, query, 5)
     except AnimeNotFoundError:
         return await _safe_edit_text(status, f"No anime found for '{query}'.")
     except AnimeCliUnavailableError:
@@ -112,6 +127,11 @@ async def download_anime_command(update: Update, context: ContextTypes.DEFAULT_T
         logging.error("[ANIME] Search error: %s", sanitize_error(exc))
         results = []
 
+    first = results[0] if results else None
+    ep_cache = {}
+    if first and first.get("episodes"):
+        ep_cache[(1, False)] = first["episodes"]
+
     token = uuid.uuid4().hex[:10]
     session = {
         "query": query,
@@ -119,7 +139,9 @@ async def download_anime_command(update: Update, context: ContextTypes.DEFAULT_T
         "owner_id": user.id,
         "owner_tag": owner_tag,
         "index": 1,
-        "title": results[0] if results else query,
+        "title": first["title"] if first else query,
+        "total_episodes": first.get("episodes") if first else None,
+        "ep_cache": ep_cache,
         "dub": False,
         "quality": "720",
         "episode": episode or 1,
@@ -130,6 +152,7 @@ async def download_anime_command(update: Update, context: ContextTypes.DEFAULT_T
 
     # Fallback directly to options (-S 1) if search list was skipped or unavailable
     if not results:
+        await _refresh_episode_count(session)
         text, markup = _render_options_message(session, token)
         return await _safe_edit_text(
             status,
@@ -140,8 +163,9 @@ async def download_anime_command(update: Update, context: ContextTypes.DEFAULT_T
 
     lines = [f"<b>Search results for {html.escape(query)}</b> (locked to {html.escape(owner_tag)}):", ""]
     pick_buttons = []
-    for idx, title in enumerate(results, start=1):
-        lines.append(f"{idx}. {html.escape(title)}")
+    for idx, item in enumerate(results, start=1):
+        ep_note = f" ({item['episodes']} eps)" if item.get("episodes") else ""
+        lines.append(f"{idx}. {html.escape(item['title'])}{ep_note}")
         pick_buttons.append(InlineKeyboardButton(str(idx), callback_data=f"anime|pick|{idx}|{token}"))
 
     keyboard = [
@@ -195,10 +219,16 @@ async def anime_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             idx = int(value)
             results = session.get("results") or []
             if 1 <= idx <= len(results):
+                item = results[idx - 1]
                 session["index"] = idx
-                session["title"] = results[idx - 1]
+                session["title"] = item["title"] if isinstance(item, dict) else item
+                ep_count = item.get("episodes") if isinstance(item, dict) else None
+                if ep_count:
+                    session.setdefault("ep_cache", {})[(idx, bool(session["dub"]))] = ep_count
+                await _refresh_episode_count(session)
         elif action == "audio":
             session["dub"] = value == "dub"
+            await _refresh_episode_count(session)
         elif action == "qual":
             if value in VALID_QUALITIES:
                 session["quality"] = value
@@ -207,7 +237,8 @@ async def anime_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 delta = int(value)
             except ValueError:
                 return
-            session["episode"] = max(1, min(ANIME_MAX_EPISODE, session["episode"] + delta))
+            max_ep = session.get("total_episodes") or ANIME_MAX_EPISODE
+            session["episode"] = max(1, min(max_ep, session["episode"] + delta))
 
         text, markup = _render_options_message(session, token)
         return await _safe_edit_text(query.message, text, parse_mode="HTML", reply_markup=markup)

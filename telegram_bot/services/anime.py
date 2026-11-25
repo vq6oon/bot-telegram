@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from ..config import (
     ANI_CLI_BIN,
@@ -19,7 +20,9 @@ from .drive import sanitize_error
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _EPISODE_ONLY_RE = re.compile(r"^\d+(?:\.\d+)?$")
+_TITLE_EPISODE_RE = re.compile(r"\((\d+)\s+episodes?\)\s*$", re.IGNORECASE)
 _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".ts", ".avi", ".mov", ".m4v"}
+_SUBTITLE_EXTENSIONS = {".vtt", ".srt", ".ass", ".ssa"}
 _TEMP_SUFFIXES = (".part", ".tmp", ".ytdl", ".aria2")
 VALID_QUALITIES = ("360", "720", "1080", "best")
 
@@ -138,9 +141,8 @@ def _write_executable_shim(path: str, script: str) -> None:
 
 
 def _build_shim_env(shim_dir: str, *, capture_fzf: bool) -> tuple[dict[str, str], str | None]:
-    # Headless servers lack mpv/vlc; satisfy ani-cli's startup player check cleanly.
-    if not shutil.which("mpv") and not shutil.which("vlc"):
-        _write_executable_shim(os.path.join(shim_dir, "mpv"), "#!/bin/sh\nexit 0\n")
+    # Always shadow mpv at the front of PATH so ani-cli never launches a GUI player.
+    _write_executable_shim(os.path.join(shim_dir, "mpv"), "#!/bin/sh\nexit 0\n")
 
     capture_file: str | None = None
     if capture_fzf:
@@ -154,6 +156,7 @@ def _build_shim_env(shim_dir: str, *, capture_fzf: bool) -> tuple[dict[str, str]
 
     env = os.environ.copy()
     env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["ANI_CLI_PLAYER"] = "mpv"
     if capture_file:
         env["ANI_CLI_CAPTURE_FILE"] = capture_file
     return env, capture_file
@@ -223,6 +226,98 @@ def search_anime(query: str, max_results: int = 5) -> list[str]:
         return []
 
 
+def fetch_anime_episodes(query: str, index: int, dub: bool = False) -> list[int]:
+    """
+    Probe available episode numbers for a specific ani-cli result index without downloading.
+    Returns sorted unique integer episode numbers, or [] if unavailable / single-match.
+    """
+    ani_bin = is_ani_cli_available()
+    if not ani_bin:
+        return []
+
+    safe_index = max(1, int(index))
+    cmd = [ani_bin, "-S", str(safe_index)]
+    if dub:
+        cmd.append("--dub")
+    cmd.append(query)
+
+    with tempfile.TemporaryDirectory(prefix="anicli-ep-shim-") as shim_dir:
+        env, capture_file = _build_shim_env(shim_dir, capture_fzf=True)
+        try:
+            subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=min(ANI_CLI_SEARCH_TIMEOUT_SECONDS, 15),
+                env=env,
+                check=False,
+            )
+        except Exception as err:
+            logging.warning("[ANIME] Episode probe failed for '%s' (#%s): %s", query, safe_index, sanitize_error(err))
+            return []
+
+        if not capture_file or not os.path.isfile(capture_file):
+            return []
+
+        try:
+            raw = Path(capture_file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+
+    lines = [
+        cleaned
+        for line in raw.splitlines()
+        if (cleaned := _ANSI_ESCAPE_RE.sub("", line).strip())
+    ]
+    if not lines or not all(_EPISODE_ONLY_RE.match(item) for item in lines):
+        return []
+
+    episodes = sorted({int(float(item)) for item in lines if int(float(item)) >= 1})
+    return episodes
+
+
+def _parse_title_episode_count(title: str) -> tuple[str, int | None]:
+    match = _TITLE_EPISODE_RE.search(title)
+    if not match:
+        return title, None
+    count = int(match.group(1))
+    clean_title = title[:match.start()].strip() or title
+    return clean_title, count if count >= 1 else None
+
+
+def search_anime_with_episodes(query: str, max_results: int = 5) -> list[dict]:
+    """
+    Search titles via ani-cli and attach known total episode counts.
+    Returns list of {'title': str, 'episodes': int | None}.
+    """
+    titles = search_anime(query, max_results=max_results)
+    if not titles:
+        return []
+
+    entries: list[dict] = []
+    missing_indices: list[int] = []
+    for idx, raw_title in enumerate(titles, start=1):
+        clean_title, count = _parse_title_episode_count(raw_title)
+        entries.append({"title": clean_title, "episodes": count})
+        if count is None:
+            missing_indices.append(idx)
+
+    if missing_indices:
+        with ThreadPoolExecutor(max_workers=len(missing_indices)) as pool:
+            futures = {idx: pool.submit(fetch_anime_episodes, query, idx) for idx in missing_indices}
+            for idx, fut in futures.items():
+                try:
+                    eps = fut.result()
+                    if eps:
+                        entries[idx - 1]["episodes"] = max(eps)
+                except Exception:
+                    pass
+
+    return entries
+
+
 def _find_downloaded_file(job_dir: str) -> str | None:
     candidates: list[Path] = []
     fallback: list[Path] = []
@@ -248,6 +343,88 @@ def _find_downloaded_file(job_dir: str) -> str | None:
         return None
     best = max(pool, key=lambda p: p.stat().st_size)
     return str(best)
+
+
+def _find_subtitle_file(job_dir: str) -> str | None:
+    root = Path(job_dir)
+    if not root.is_dir():
+        return None
+    subs = [
+        item
+        for item in root.rglob("*")
+        if item.is_file()
+        and item.suffix.lower() in _SUBTITLE_EXTENSIONS
+        and item.stat().st_size > 0
+    ]
+    if not subs:
+        return None
+    best = max(subs, key=lambda p: p.stat().st_size)
+    return str(best)
+
+
+def _run_ffmpeg_mux(ffmpeg_bin: str, video_path: str, sub_path: str, out_path: str, sub_codec: str) -> bool:
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        video_path,
+        "-i",
+        sub_path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-map",
+        "1:0",
+        "-c",
+        "copy",
+        "-c:s",
+        sub_codec,
+        "-metadata:s:s:0",
+        "language=eng",
+        out_path,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=ANI_CLI_TIMEOUT_SECONDS,
+            check=False,
+        )
+        return proc.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+    except Exception as err:
+        logging.warning("[ANIME] ffmpeg mux failed (%s): %s", sub_codec, sanitize_error(err))
+        return False
+
+
+def _mux_softsub_if_present(video_path: str, job_dir: str) -> str:
+    """Embed external .vtt/.srt/.ass subtitle track into the video when present."""
+    sub_path = _find_subtitle_file(job_dir)
+    if not sub_path:
+        return video_path
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        logging.warning("[ANIME] Softsub found (%s) but ffmpeg is missing; skipping mux.", Path(sub_path).name)
+        return video_path
+
+    src = Path(video_path)
+    mp4_target = str(src.with_name(f"{src.stem}_muxed.mp4"))
+    if src.suffix.lower() in {".mp4", ".m4v", ".mov"} and _run_ffmpeg_mux(ffmpeg_bin, video_path, sub_path, mp4_target, "mov_text"):
+        logging.info("[ANIME] Auto-muxed softsub %s into %s", Path(sub_path).name, Path(mp4_target).name)
+        return mp4_target
+
+    mkv_target = str(src.with_name(f"{src.stem}_muxed.mkv"))
+    mkv_codec = "srt" if Path(sub_path).suffix.lower() == ".vtt" else "copy"
+    if _run_ffmpeg_mux(ffmpeg_bin, video_path, sub_path, mkv_target, mkv_codec):
+        logging.info("[ANIME] Auto-muxed softsub %s into %s", Path(sub_path).name, Path(mkv_target).name)
+        return mkv_target
+
+    logging.warning("[ANIME] Softsub auto-mux failed for %s; returning raw video.", Path(sub_path).name)
+    return video_path
 
 
 def download_anime(
@@ -319,6 +496,7 @@ def download_anime(
         shutil.rmtree(job_dir, ignore_errors=True)
         return None
 
-    ext = Path(downloaded).suffix or ".mp4"
+    final_video = _mux_softsub_if_present(downloaded, job_dir)
+    ext = Path(final_video).suffix or ".mp4"
     clean_name = build_clean_anime_filename(title or query, safe_episode, q, ext)
-    return downloaded, clean_name, job_dir
+    return final_video, clean_name, job_dir
