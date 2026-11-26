@@ -31,9 +31,9 @@ class ApplicationWiringTests(unittest.TestCase):
             elif isinstance(handler, MessageHandler):
                 actual.append(("message", handler.callback.__name__, str(handler.filters)))
         expected_commands = [
-            "start", "menu", "lapor", "rules", "shorten", "convert",
+            "start", "menu", "rules", "shorten", "convert",
             "yt", "ytm", "ig", "tt", "anime", "status",
-            "id", "github", "contributor", "uptime", "clearcache", "whois",
+            "id", "github", "contributor", "changelog", "uptime", "clearcache", "whois",
             "list", "cleardrive", "checkdrive", "upload",
         ]
         self.assertEqual([x[1] for x in actual if x[0] == "command"], expected_commands)
@@ -46,10 +46,10 @@ class ApplicationWiringTests(unittest.TestCase):
                 "clear_drive_callback",
             ],
         )
-        self.assertEqual([x[1] for x in actual if x[0] == "message"], ["handle_report_reply", "upload"])
+        self.assertEqual([x[1] for x in actual if x[0] == "message"], ["upload"])
         self.assertEqual(builder.concurrent_limit, 8)
-        self.assertEqual(len(handlers), 28)
-        self.assertEqual(handlers[25].callback.__name__, handlers[26].callback.__name__)
+        self.assertEqual(len(handlers), 27)
+        self.assertEqual(handlers[24].callback.__name__, handlers[25].callback.__name__)
 
     def test_entrypoint_only_loads_environment_and_starts_bot(self):
         from pathlib import Path

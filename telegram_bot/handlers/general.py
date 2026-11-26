@@ -84,8 +84,7 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Supported links: *YouTube, TikTok, Instagram*.\n"
         "3. Large files are uploaded to *public Google Drive*.\n"
         "4. *Do not upload illegal, pornographic, or pirated content*.\n"
-        "5. The bot may delete old files when Drive is full.\n"
-        "6. Use /lapor to report bugs or issues.\n\n"
+        "5. The bot may delete old files when Drive is full.\n\n"
         "By using this bot, you agree to these rules."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)

@@ -42,7 +42,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 COOLDOWN_SECONDS = 30
 OWNER_ID = _int_env("OWNER_ID", 0)
 GITHUB_LINK = os.environ.get("GITHUB_LINK", "")
-GROUP_LAPOR_ID = _int_env("GROUP_LAPOR_ID", 0)
 
 # Telegram limits
 MAX_TELEGRAM_DOWNLOAD_SIZE = 20 * 1024 * 1024  # 20 MB getFile limit

@@ -19,7 +19,6 @@ _INFO = (
     "/changelog · recent changes\n"
     "/rules · usage rules\n"
     "/id · Telegram account ID\n"
-    "/lapor · report a problem\n"
 )
 
 _DOWNLOAD = (

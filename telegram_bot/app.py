@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 from .config import BOT_TOKEN
-from .handlers import admin, anime, changelog, drive, general, media, reports
+from .handlers import admin, anime, changelog, drive, general, media
 from .logging_setup import configure_logging
 from .services import drive as drive_service
 
@@ -34,8 +34,6 @@ def build_application():
 
     app.add_handler(CommandHandler("start", general.start))
     app.add_handler(CommandHandler("menu", general.menu))
-    app.add_handler(CommandHandler("lapor", reports.report_command))
-    app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, reports.handle_report_reply))
     app.add_handler(CommandHandler("rules", general.rules))
     app.add_handler(CommandHandler("shorten", general.shorten))
     app.add_handler(CallbackQueryHandler(media.tiktok_callback_handler, pattern="^tt\\|"))

@@ -43,7 +43,6 @@ Logs write to both `bot-activity.log` and stderr using `[%Y-%m-%d %H:%M:%S] [LEV
 | --- | --- | --- |
 | `BOT_TOKEN` | empty (required) | Telegram bot token |
 | `OWNER_ID` | `0` | Owner ID for `/uptime`, `/clearcache`, `/whois`, `/cleardrive`; always included in Drive whitelist |
-| `GROUP_LAPOR_ID` | `0` | Destination chat ID for `/lapor` reports |
 | `GITHUB_LINK` | empty | Reply URL returned by `/github` |
 | `DRIVE_FOLDER_ID` | empty | Target Drive folder ID; when unset, looks up or creates `DRIVE_FOLDER_NAME` |
 | `DRIVE_FOLDER_NAME` | `Bot-Uploads` | Folder name used when `DRIVE_FOLDER_ID` is empty |
@@ -73,7 +72,6 @@ All media downloads require explicit commands; plain chat messages and uncommand
 | `/rules` | `general.rules` | Displays usage rules |
 | `/id` | `general.get_id` | Replies with user ID, username, and full name |
 | `/shorten <url>` | `general.shorten` | Shortens an `http`/`https` URL via TinyURL |
-| `/lapor` | `reports.report_command` | Prompts with `ForceReply`; forwards the reply to `GROUP_LAPOR_ID` |
 | `/yt <link>` | `media.download_youtube_command` | Queries available video tiers (`360p`, `480p`, `720p`, `1080p`, or `Best`) from `formats`, plus `MP3` and `Subtitle` (`id`/`en`/`es` if present) |
 | `/ytm <link>` | `media.download_youtube_music_command` | Downloads `music.youtube.com` audio as MP3 titled `uploader - title` |
 | `/ig <link>` | `media.download_instagram_command` | Downloads Instagram posts/Reels merged to MP4 |
@@ -114,7 +112,7 @@ telegram_bot/
   config.py                          .env loader and runtime constants
   logging_setup.py                   File + stderr logging configuration
   state.py                           BOT_START, user_cooldowns
-  handlers/                          general, admin, changelog, reports, drive, media
+  handlers/                          general, admin, changelog, drive, media
   menus/                             welcome.py, commands.py, contributors.py
   services/                          drive.py, job_tracker.py, media.py, subtitles.py, tiktok.py, anime.py
 tests/                               Unit test suite (64 tests, offline)
