@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 from .config import BOT_TOKEN
-from .handlers import admin, anime, drive, general, media, reports
+from .handlers import admin, anime, changelog, drive, general, media, reports
 from .logging_setup import configure_logging
 from .services import drive as drive_service
 
@@ -51,6 +51,7 @@ def build_application():
     app.add_handler(CommandHandler("id", general.get_id))
     app.add_handler(CommandHandler("github", general.github_command))
     app.add_handler(CommandHandler("contributor", general.contributor))
+    app.add_handler(CommandHandler("changelog", changelog.changelog))
     app.add_handler(CommandHandler("uptime", admin.uptime))
     app.add_handler(CommandHandler("clearcache", admin.clearcache))
     app.add_handler(CommandHandler("whois", admin.whois))

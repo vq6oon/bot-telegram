@@ -16,6 +16,7 @@ _INFO = (
     "/menu · show this menu\n"
     "/github · developer profile\n"
     "/contributor · bot contributors\n"
+    "/changelog · recent changes\n"
     "/rules · usage rules\n"
     "/id · Telegram account ID\n"
     "/lapor · report a problem\n"
