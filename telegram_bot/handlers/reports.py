@@ -4,37 +4,42 @@ from telegram.ext import ContextTypes
 import logging
 from ..config import GROUP_LAPOR_ID
 
-async def lapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
     await update.message.reply_text(
-        "Silakan ketik laporan atau pesan Anda lalu kirim.\n"
-        "Bot akan meneruskannya ke admin.",
+        "Type your report or message and send it.\n"
+        "The bot will forward it to the admins.",
         reply_markup=ForceReply(selective=True)
     )
 
-async def handle_laporan_balasan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message and "lapor" in update.message.reply_to_message.text.lower():
-        user = update.effective_user
-        user_info = f"{user.id} (@{user.username or '-'} / {user.full_name})"
-        isi_laporan = update.message.text
+async def handle_report_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.reply_to_message:
+        return
+    if "report" not in (update.message.reply_to_message.text or "").lower():
+        return
+    user = update.effective_user
+    if not user:
+        return
+    user_info = f"{user.id} (@{user.username or '-'} / {user.full_name})"
+    report_text = update.message.text
 
-        text_admin = (
-            f"*Laporan Baru dari Pengguna:*\n"
-            f"{user_info}\n\n"
-            f"Pesan:\n{isi_laporan}"
+    admin_text = (
+        f"*New Report:*\n"
+        f"{user_info}\n\n"
+        f"Message:\n{report_text}"
+    )
+
+    status_msg = await update.message.reply_text("Sending your report to the admins...")
+    logging.info("[REPORT] From %s: %s", user_info, report_text)
+
+    try:
+        await context.bot.send_message(
+            chat_id=GROUP_LAPOR_ID,
+            text=admin_text,
+            parse_mode=ParseMode.MARKDOWN
         )
-
-        status_msg = await update.message.reply_text("Mengirim laporan kamu ke admin...")
-        logging.info(f"[LAPOR] Dari {user_info}: {isi_laporan}")
-
-        try:
-            await context.bot.send_message(
-                chat_id=GROUP_LAPOR_ID,
-                text=text_admin,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            await status_msg.edit_text("Laporan berhasil dikirim ke admin. Terima kasih!")
-            return
-        except Exception as e:
-            logging.error(f"[LAPOR] Gagal kirim laporan ke grup: {e}")
-            await status_msg.edit_text(f"Gagal kirim laporan ke admin: {e}")
-            return
+        await status_msg.edit_text("Report sent to the admins. Thank you!")
+    except Exception as e:
+        logging.error("[REPORT] Failed to send report to group: %s", e)
+        await status_msg.edit_text(f"Failed to send report to the admins: {e}")

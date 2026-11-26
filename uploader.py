@@ -37,5 +37,5 @@ if __name__ == "__main__":
     os.makedirs("temp_upload", exist_ok=True)
     app = ApplicationBuilder().token(UPLOAD_TOKEN).build()
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    print("Uploader bot aktif.")
+    print("Uploader bot is active.")
     app.run_polling()

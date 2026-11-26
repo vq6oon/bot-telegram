@@ -736,7 +736,7 @@ async def _process_tiktok_url(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     user = update.effective_user
     logging.info("[TIKTOK] %s sent link: %s", _user_tag(user), url)
-    msg = await update.message.reply_text("Mendeteksi link TikTok...")
+    msg = await update.message.reply_text("Detecting TikTok link...")
     try:
         r = await asyncio.to_thread(
             requests.get, "https://tikwm.com/api/", params={"url": url}, timeout=30
@@ -744,6 +744,12 @@ async def _process_tiktok_url(update: Update, context: ContextTypes.DEFAULT_TYPE
         res = r.json()
         data = res.get("data")
         if res.get("code") == 0 and data:
+            user_data = context.user_data
+            if user_data is None:
+                logging.error("TikTok session storage is unavailable for this update")
+                await msg.edit_text("Unable to prepare the TikTok download. Please try again.")
+                return
+
             if data.get("images"):
                 media_group = [
                     InputMediaPhoto(media=img_url) for img_url in data["images"][:10]
@@ -752,30 +758,35 @@ async def _process_tiktok_url(update: Update, context: ContextTypes.DEFAULT_TYPE
                     await context.bot.send_media_group(chat_id=user.id, media=media_group)
                     logging.info("[TIKTOK] Delivered photo album to %s", user.id)
                     await update.message.reply_text(
-                        "Album foto TikTok dikirim lewat chat pribadi Anda.",
+                        "TikTok photo album sent to your private chat.",
                         reply_to_message_id=update.message.message_id,
                     )
                 except Exception as e:
                     logging.error("Failed to send TikTok album privately: %s", sanitize_error(e))
-                    await msg.edit_text("Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
+                    await msg.edit_text("Open the bot's private chat, send /start, then resend the TikTok link in the group.")
                 else:
                     await msg.delete()
                 return
 
             short_id = str(uuid.uuid4())[:8]
-            context.user_data[f"tt_{short_id}"] = {
+            session = {
                 "video_url": data.get("play"),
                 "audio_url": data.get("music"),
                 "title": data.get("title", "TikTok"),
-                "owner_id": user.id,
-                "chat_id": update.effective_chat.id,
-                "source_message_id": update.message.message_id,
             }
+            for field_name, field_value in (
+                ("owner_id", getattr(user, "id", None)),
+                ("chat_id", getattr(update.effective_chat, "id", None)),
+                ("source_message_id", getattr(update.message, "message_id", None)),
+            ):
+                if field_value is not None:
+                    session[field_name] = field_value
+            context.user_data[f"tt_{short_id}"] = session
 
             try:
                 await context.bot.send_message(
                     chat_id=user.id,
-                    text="Pilih format TikTok ini. Hasil hanya dikirim lewat chat pribadi Anda:",
+                    text="Choose a TikTok format. The result is sent only to your private chat:",
                     reply_markup=InlineKeyboardMarkup([
                         [
                             InlineKeyboardButton("Video", callback_data=f"tt|video|{short_id}"),
@@ -784,7 +795,7 @@ async def _process_tiktok_url(update: Update, context: ContextTypes.DEFAULT_TYPE
                     ]),
                 )
                 await update.message.reply_text(
-                    "Pilihan dikirim lewat chat pribadi Anda. Unduhan juga akan dikirim ke chat pribadi.",
+                    "Format options sent to your private chat. Downloads also go to the private chat.",
                     reply_to_message_id=update.message.message_id,
                 )
                 logging.info("[TIKTOK] Sent format options to %s", user.id)
@@ -792,13 +803,13 @@ async def _process_tiktok_url(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception as e:
                 logging.info("TikTok private delivery unavailable: %s", sanitize_error(e))
                 context.user_data.pop(f"tt_{short_id}", None)
-                await msg.edit_text("Buka chat pribadi bot, kirim /start, lalu kirim ulang link TikTok di grup.")
+                await msg.edit_text("Open the bot's private chat, send /start, then resend the TikTok link in the group.")
             return
 
-        await msg.edit_text("Gagal unduh TikTok: Respon tidak valid.")
+        await msg.edit_text("Failed to download TikTok: invalid response.")
     except Exception as e:
         logging.error("TikTok error: %s", sanitize_error(e))
-        await msg.edit_text(f"Gagal unduh TikTok: {sanitize_error(e)}")
+        await msg.edit_text(f"Failed to download TikTok: {sanitize_error(e)}")
 
 
 async def download_tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

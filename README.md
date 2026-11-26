@@ -1,6 +1,6 @@
 # Lamp1on-Bot
 
-Telegram bot for downloading YouTube, Instagram, and TikTok media and storing large files on Google Drive. Built with `python-telegram-bot` (async), `yt-dlp`, `ffmpeg`/`ffprobe`, and Google Drive API v3. Menu version: `v1.5.0`.
+Telegram bot for downloading YouTube, Instagram, and TikTok media and storing large files on Google Drive. Built with `python-telegram-bot` (async), `yt-dlp`, `ffmpeg`/`ffprobe`, and Google Drive API v3. Menu version: `v3.0.0`.
 
 ## Requirements
 
@@ -65,12 +65,14 @@ All media downloads require explicit commands; plain chat messages and uncommand
 
 | Command | Handler | Behavior |
 | --- | --- | --- |
-| `/start` | `general.start` | Sends `assets/v1.5.png` with welcome caption and menu button |
+| `/start` | `general.start` | Sends a welcome greeting and points users to `/menu` |
+| `/menu` | `general.menu` | Sends menu banner and public command caption. `/menu --admin` (owner only) sends the admin caption with owner commands |
 | `/github` | `general.github_command` | Replies with `GITHUB_LINK` |
+| `/contributor` | `general.contributor` | Lists bot contributors from `menus/contributors.py` |
 | `/rules` | `general.rules` | Displays usage rules |
 | `/id` | `general.get_id` | Replies with user ID, username, and full name |
 | `/shorten <url>` | `general.shorten` | Shortens an `http`/`https` URL via TinyURL |
-| `/lapor` | `reports.lapor` | Prompts with `ForceReply`; forwards the reply to `GROUP_LAPOR_ID` |
+| `/lapor` | `reports.report_command` | Prompts with `ForceReply`; forwards the reply to `GROUP_LAPOR_ID` |
 | `/yt <link>` | `media.download_youtube_command` | Queries available video tiers (`360p`, `480p`, `720p`, `1080p`, or `Best`) from `formats`, plus `MP3` and `Subtitle` (`id`/`en`/`es` if present) |
 | `/ytm <link>` | `media.download_youtube_music_command` | Downloads `music.youtube.com` audio as MP3 titled `uploader - title` |
 | `/ig <link>` | `media.download_instagram_command` | Downloads Instagram posts/Reels merged to MP4 |
@@ -83,7 +85,7 @@ All media downloads require explicit commands; plain chat messages and uncommand
 | `/cleardrive` | `drive.clear_drive` | Owner only. Inline confirmation before deleting all files in the Drive folder |
 | `/uptime`, `/clearcache`, `/whois <id>` | `admin` | Owner only. Process uptime, local cache cleanup (`youtube-dump`, `ig-dump`, `subs`), and Telegram user lookup |
 
-Inline callback prefixes: `open_menu_commands`, `back_to_main`, `yt|...` (locked to `owner_id`, 12-char hex token in `bot_data`), `tt|...` (locked to `owner_id`, 8-char ID in `user_data`), `confirm_clear_drive`, and `cancel_clear_drive`.
+Inline callback prefixes: `yt|...` (locked to `owner_id`, 12-char hex token in `bot_data`), `tt|...` (locked to `owner_id`, 8-char ID in `user_data`), `confirm_clear_drive`, and `cancel_clear_drive`.
 
 ## Media and Drive Architecture
 
@@ -103,16 +105,16 @@ get_token.py                         OAuth setup script writing token.json (0o60
 requirements.txt                     Python dependencies
 uploader.py                          Standalone helper bot forwarding docs to CHANNEL_ID
 ig_scraper.py                        Standalone Playwright scraper (not imported by bot)
-assets/                              Start banner images (assets/v1.5.png used by /start)
+assets/                              Menu banner image (`kamui.png` used by `/menu`)
 telegram_bot/
   app.py                             ApplicationBuilder, timeouts, handler registration
   config.py                          .env loader and runtime constants
   logging_setup.py                   File + stderr logging configuration
-  state.py                           BOT_START, START_IMAGE_FILE_ID, user_cooldowns
+  state.py                           BOT_START, user_cooldowns
   handlers/                          general, admin, reports, drive, media
-  menus/                             welcome.py, commands.py
+  menus/                             welcome.py, commands.py, contributors.py
   services/                          drive.py, job_tracker.py, media.py, subtitles.py, tiktok.py
-tests/                               Unit test suite (41 tests, offline)
+tests/                               Unit test suite (64 tests, offline)
 ```
 
 Runtime temp directories (`youtube-dump/`, `ig-dump/`, `subs/`, `converted/`) and sensitive files (`.env`, `cookies.txt`, `credentials.json`, `token.json`, `bot-activity.log`) are excluded from version control.
@@ -125,4 +127,4 @@ Run all unit tests offline:
 python -m unittest discover -s tests -v
 ```
 
-The 41 unit tests cover Drive token refresh, atomic `0o600` writes, resumable upload updates and cleanup pagination, error redaction, `/upload` media/external-reply detection and fresh completion replies, YouTube resolution filtering, `ffprobe` fallback labeling, clean `<title> (<res>p).mp4` filenames, `/yt` + `/ytm` + `/tt` command isolation, menu contents, and handler registration order.
+The 64 unit tests cover Drive token refresh, atomic `0o600` writes, resumable upload updates and cleanup pagination, error redaction, `/upload` media/external-reply detection and fresh completion replies, YouTube resolution filtering, `ffprobe` fallback labeling, clean `<title> (<res>p).mp4` filenames, `/yt` + `/ytm` + `/tt` command isolation, welcome/menu behavior, and handler registration order.
