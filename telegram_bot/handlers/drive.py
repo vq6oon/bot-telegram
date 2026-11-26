@@ -156,10 +156,7 @@ async def deliver_fresh_message(
 
 async def check_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = _get_message(update)
-    user = getattr(update, "effective_user", None)
-    if not msg or not user or not _authorized(user.id):
-        if msg:
-            await msg.reply_text("Access denied.")
+    if not msg:
         return
 
     try:
@@ -175,9 +172,7 @@ async def check_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_drive_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = _get_message(update)
     user = getattr(update, "effective_user", None)
-    if not msg or not user or not _authorized(user.id):
-        if msg:
-            await msg.reply_text("Access denied.")
+    if not msg:
         return
 
     status = await msg.reply_text("Fetching file list...")
@@ -236,9 +231,7 @@ async def clear_drive_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = _get_message(update)
     user = getattr(update, "effective_user", None)
-    if not msg or not user or not _authorized(user.id):
-        if msg:
-            await msg.reply_text("Access denied.")
+    if not msg:
         return
 
     reply = getattr(msg, "reply_to_message", None)
