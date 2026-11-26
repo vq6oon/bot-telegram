@@ -31,24 +31,22 @@ class ApplicationWiringTests(unittest.TestCase):
             elif isinstance(handler, MessageHandler):
                 actual.append(("message", handler.callback.__name__, str(handler.filters)))
         expected_commands = [
-            "start", "lapor", "rules", "shorten", "convert",
+            "start", "menu", "lapor", "rules", "shorten", "convert",
             "yt", "ytm", "ig", "tt", "anime", "status",
-            "id", "github", "uptime", "clearcache", "whois",
+            "id", "github", "contributor", "uptime", "clearcache", "whois",
             "list", "cleardrive", "checkdrive", "upload",
         ]
         self.assertEqual([x[1] for x in actual if x[0] == "command"], expected_commands)
         self.assertEqual(
             [x[1] for x in actual if x[0] == "callback"],
             [
-                "menu_callback_handler",
-                "start_callback_handler",
                 "tiktok_callback_handler",
                 "yt_callback_handler",
                 "anime_callback_handler",
                 "clear_drive_callback",
             ],
         )
-        self.assertEqual([x[1] for x in actual if x[0] == "message"], ["handle_laporan_balasan", "upload"])
+        self.assertEqual([x[1] for x in actual if x[0] == "message"], ["handle_report_reply", "upload"])
         self.assertEqual(builder.concurrent_limit, 8)
         self.assertEqual(len(handlers), 28)
         self.assertEqual(handlers[25].callback.__name__, handlers[26].callback.__name__)

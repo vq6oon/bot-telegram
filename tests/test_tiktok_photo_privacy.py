@@ -28,9 +28,9 @@ class TikTokPhotoPrivacyTests(unittest.TestCase):
             self.assertEqual(len([e for e in events if e[0]=="dm_album"]),1)
             self.assertEqual([e[1]["chat_id"] for e in events if e[0]=="dm_album"], [42])
             self.assertFalse(any(e[0]=="group_album" for e in events))
-            self.assertFalse(any(e[0]=="group_reply" and ("mengirim" in e[1].lower() or "download" in e[1].lower()) for e in events))
+            self.assertFalse(any(e[0]=="group_reply" and ("sending" in e[1].lower() or "download" in e[1].lower()) for e in events))
             notice=[e for e in events if e[0]=="group_reply"]
-            self.assertTrue(any("pribadi" in e[1].lower() and e[2].get("reply_to_message_id")==77 for e in notice))
+            self.assertTrue(any("private chat" in e[1].lower() and e[2].get("reply_to_message_id")==77 for e in notice))
         asyncio.run(run())
 
 def _record(events, kind, value):
