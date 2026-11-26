@@ -58,6 +58,11 @@ class MenuContentTests(unittest.IsolatedAsyncioTestCase):
         for command in ("/cleardrive", "/uptime", "/clearcache", "/whois <id>"):
             with self.subTest(command=command):
                 self.assertIn(command, caption)
+        for public_command in ("/yt <url>", "/ytm <url>", "/ig <url>", "/tt <url>",
+                               "/anime <title>", "/upload", "/list", "/shorten", "/convert", "/status"):
+            with self.subTest(public_command=public_command):
+                self.assertNotIn(public_command, caption)
+        self.assertLess(len(caption), 1024)
 
     async def test_admin_flag_denies_non_owner_without_sending_admin_menu(self):
         message = SimpleNamespace(reply_photo=AsyncMock(), reply_text=AsyncMock())

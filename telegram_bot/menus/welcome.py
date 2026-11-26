@@ -1,4 +1,5 @@
 """Welcome text and command menu sections for /start and /menu."""
+
 WELCOME_MESSAGE = (
     "Kamui-Bot · v3.0.0\n\n"
     "Welcome! Send a supported command to get started.\n"
@@ -36,8 +37,6 @@ _PUBLIC_DRIVE = (
     "/upload · upload replied or captioned media\n"
 )
 
-_ADMIN_CLEAR_DRIVE = "/cleardrive · clear Drive folder (owner only)\n"
-
 _SEARCH = "› Search\n/shorten <url> · shorten URL\n"
 
 _PUBLIC_TOOLS = (
@@ -46,27 +45,16 @@ _PUBLIC_TOOLS = (
     "/status · active download status\n"
 )
 
-_ADMIN_CLEAR_CACHE = "/clearcache · clear media cache (owner only)\n"
-
-_ADMIN = (
+_ADMIN_ONLY = (
     "› Admin\n"
-    "/uptime · bot uptime (owner only)\n"
-    "/whois <id> · Telegram user info (owner only)\n"
+    "/cleardrive · clear Drive folder\n"
+    "/clearcache · clear media cache\n"
+    "/uptime · bot uptime\n"
+    "/whois <id> · Telegram user info\n"
 )
 
 MENU_CAPTION = "\n".join(
     [_BRAND, _INFO, _DOWNLOAD, _PUBLIC_DRIVE, _SEARCH, _PUBLIC_TOOLS, _HANDLE]
 )
 
-ADMIN_CAPTION = "\n".join(
-    [
-        f"{_BRAND} · admin",
-        _INFO,
-        _DOWNLOAD,
-        _PUBLIC_DRIVE + _ADMIN_CLEAR_DRIVE,
-        _SEARCH,
-        _PUBLIC_TOOLS + _ADMIN_CLEAR_CACHE,
-        _ADMIN,
-        _HANDLE,
-    ]
-)
+ADMIN_CAPTION = "\n".join([f"{_BRAND} · admin", _ADMIN_ONLY, _HANDLE])
