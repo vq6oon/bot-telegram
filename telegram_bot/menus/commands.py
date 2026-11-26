@@ -1,26 +1,5 @@
-"""Command-list menu text."""
-COMMANDS_CAPTION = (
-    "*Daftar Perintah Bot:*\n\n"
-    "┌─ *Fitur Umum:*\n"
-    "├ /start - Memulai Bot atau kembali ke menu utama\n"
-    "├ /github - Lihat profil developer\n"
-    "├ /upload - Unggah file ke Google Drive (balas file)\n"
-    "├ /lapor - Melaporkan bug atau masalah ke admin\n"
-    "├ /rules - Lihat peraturan penggunaan bot\n"
-    "├ /id - Menampilkan ID Telegram Anda\n"
-    "├ /list - Daftar file di Google Drive\n"
-    "├ /checkdrive - Cek kapasitas Drive\n"
-    "├ /shorten <url> - Memperpendek tautan\n"
-    "├ /convert <nama> - Konversi video ke MP3\n"
-    "├ /yt <link> - Unduh YouTube video/audio\n"
-    "├ /ytm <link> - Unduh YouTube Music sebagai MP3\n"
-    "├ /ig <link> - Unduh Instagram/Reels\n"
-    "├ /tt <link> - Unduh TikTok video/audio/foto\n"
-    "└ /anime <judul> [-e <ep>] - Unduh episode anime (Sub/Dub)\n\n"
-    "*Fitur Admin:*\n"
-    "├ /cleardrive - Kosongkan folder Google Drive\n"
-    "├ /clearcache - Hapus cache lokal video/audio\n"
-    "├ /uptime - Cek berapa lama bot aktif\n"
-    "└ /whois <id> - Lihat info pengguna berdasarkan ID\n\n"
-    "Versi: v1.5.0 | Lamp1on-Bot"
-)
+"""Command menu text shared by the /menu handler."""
+from .welcome import ADMIN_CAPTION, MENU_CAPTION
+
+COMMANDS_CAPTION = MENU_CAPTION
+ADMIN_COMMANDS_CAPTION = ADMIN_CAPTION
