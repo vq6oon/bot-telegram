@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import requests
 import yt_dlp
+from .. import config
 from ..config import DOWNLOAD_RATELIMIT_BYTES, YTDLP_COOKIES_FILE, get_cookie_file
 from .drive import sanitize_error
 
@@ -99,6 +100,8 @@ def build_ydl_base_opts(
     }
     if cookiefile:
         opts["cookiefile"] = cookiefile
+    if config.YOUTUBE_PROXY:
+        opts["proxy"] = config.YOUTUBE_PROXY
     if ratelimit_bytes and ratelimit_bytes > 0:
         opts["ratelimit"] = int(ratelimit_bytes)
     if progress_hook is not None:

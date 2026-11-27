@@ -73,6 +73,10 @@ ANIME_MAX_EPISODE = max(1, _int_env("ANIME_MAX_EPISODE", 5000))
 _custom_cookies = os.environ.get("YTDLP_COOKIES_FILE", "").strip() or os.environ.get("COOKIE_FILE_PATH", "").strip()
 YTDLP_COOKIES_FILE = Path(_custom_cookies) if _custom_cookies else (BASE_DIR / "cookies.txt")
 
+# Optional HTTP/SOCKS proxy for YouTube (e.g. residential/rotating proxy)
+# so yt-dlp egresses from an IP not flagged by YouTube.
+YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "").strip() or None
+
 
 def get_cookie_file() -> str | None:
     env_cookie = os.environ.get("YTDLP_COOKIES_FILE", "").strip() or os.environ.get("COOKIE_FILE_PATH", "").strip()
