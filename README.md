@@ -55,8 +55,11 @@ Logs write to both `bot-activity.log` and stderr using `[%Y-%m-%d %H:%M:%S] [LEV
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Per-loop semaphore cap for concurrent YouTube jobs (min `1`) |
 | `DOWNLOAD_RATELIMIT_KBPS` | `0` | Optional `yt-dlp` bandwidth limit in KB/s (`0` = unlimited) |
 | `YTDLP_COOKIES_FILE` / `COOKIE_FILE_PATH` | `<repo>/cookies.txt` | Path to YouTube cookies file |
+| `TELEGRAM_API_BASE_URL` | `https://api.telegram.org/bot` | Telegram Bot API endpoint; override for a local Bot API server |
+| `TELEGRAM_FILE_BASE_URL` | `https://api.telegram.org/file/bot` | Telegram file endpoint; override for a local Bot API server |
+| `MAX_TELEGRAM_DOWNLOAD_SIZE` | `20971520` | Telegram download limit in bytes; set `0` only with local Bot API server |
 
-Constants in `config.py`: `MAX_TELEGRAM_DOWNLOAD_SIZE` (`20 MB` Bot API `getFile` limit) and `MAX_TELEGRAM_FILE_SIZE` (`50 MB` bot send limit). `UPLOAD_TOKEN` and `CHANNEL_ID` in `.env.example` belong only to the standalone `uploader.py` script.
+`TELEGRAM_API_BASE_URL` and `TELEGRAM_FILE_BASE_URL` default to Telegram's hosted Bot API. Set both to the matching URLs for a local Bot API server. `MAX_TELEGRAM_DOWNLOAD_SIZE` defaults to `20971520` bytes (`20 MiB`); set it to `0` only when using a local Bot API server, which can download files without size limit. Hosted Bot API bots cannot use `/upload` to fetch this 2.9 GB file; enable a local Bot API server first. `MAX_TELEGRAM_FILE_SIZE` (`50 MB` bot send limit) remains unchanged. `UPLOAD_TOKEN` and `CHANNEL_ID` in `.env.example` belong only to the standalone `uploader.py` script.
 
 ## Commands
 

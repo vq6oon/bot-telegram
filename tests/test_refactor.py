@@ -15,13 +15,23 @@ class ApplicationWiringTests(unittest.TestCase):
                 self.concurrent_limit = limit
                 return self
             def token(self, *_): return self
+            def base_url(self, value):
+                self.api_url = value
+                return self
+            def base_file_url(self, value):
+                self.file_url = value
+                return self
             def request(self, *_): return self
             def build(self): return fake
         builder = Builder()
         with patch.object(application, "configure_logging"), \
              patch.object(application, "HTTPXRequest"), \
+             patch.object(application, "TELEGRAM_API_BASE_URL", "http://localhost:8081/bot"), \
+             patch.object(application, "TELEGRAM_FILE_BASE_URL", "http://localhost:8081/file/bot"), \
              patch.object(application, "ApplicationBuilder", return_value=builder):
             application.build_application()
+        self.assertEqual(builder.api_url, "http://localhost:8081/bot")
+        self.assertEqual(builder.file_url, "http://localhost:8081/file/bot")
         actual = []
         for handler in handlers:
             if isinstance(handler, CommandHandler):

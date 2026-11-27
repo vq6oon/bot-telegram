@@ -5,7 +5,7 @@ import logging
 import mimetypes
 import os
 import tempfile
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import File as TelegramFile, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 from ..config import (
@@ -258,7 +258,11 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_id, file_name, file_size = media_info
 
-    if file_size and file_size > MAX_TELEGRAM_DOWNLOAD_SIZE:
+    if (
+        MAX_TELEGRAM_DOWNLOAD_SIZE > 0
+        and file_size
+        and file_size > MAX_TELEGRAM_DOWNLOAD_SIZE
+    ):
         size_mb = file_size / (1024 * 1024)
         return await msg.reply_text(
             f"File is {size_mb:.1f} MB. Telegram limits bot downloads to 20 MB."

@@ -1,11 +1,52 @@
 import asyncio
 import unittest
+from typing import cast
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from telegram import Bot, File as TelegramFile
 from telegram_bot.handlers import drive as drive_handler
 
 
 class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_upload_accepts_large_file_when_download_limit_is_disabled(self):
+        status = SimpleNamespace(edit_text=AsyncMock())
+        msg = SimpleNamespace(
+            chat_id=-1001,
+            message_id=77,
+            reply_to_message=SimpleNamespace(
+                document=SimpleNamespace(
+                    file_id="large-file",
+                    file_name="EvolutionX.zip",
+                    file_unique_id="large-1",
+                    file_size=2964 * 1024 * 1024,
+                )
+            ),
+            reply_text=AsyncMock(return_value=status),
+        )
+        update = SimpleNamespace(effective_message=msg, effective_user=SimpleNamespace(id=42))
+        file_path = "/tmp/bot-api-files/EvolutionX.zip"
+        bot = SimpleNamespace(get_file=AsyncMock())
+        context = SimpleNamespace(bot=bot)
+        tg_file = TelegramFile.de_json(
+            {"file_id": "large-file", "file_unique_id": "large-1", "file_path": file_path},
+            cast(Bot, bot),
+        )
+        bot.get_file.return_value = tg_file
+
+        with patch.object(drive_handler, "MAX_TELEGRAM_DOWNLOAD_SIZE", 0):
+            with patch.object(drive_handler, "DRIVE_ALLOWED_USER_IDS", frozenset({42})):
+                with patch.object(drive_handler, "upload_to_drive", return_value="https://drive.google.com/file/d/large/view") as up:
+                    with patch.object(drive_handler, "get_user_info", return_value="test user"):
+                        with patch.object(drive_handler.os.path, "isfile", return_value=True):
+                            with patch.object(TelegramFile, "download_to_drive", new_callable=AsyncMock) as local_download:
+                                await drive_handler.upload(update, context)
+
+        bot.get_file.assert_awaited_once_with("large-file")
+        local_download.assert_awaited_once()
+        self.assertEqual(up.call_args.args[2], "EvolutionX.zip")
+        self.assertEqual(msg.reply_text.await_args_list[0].args[0], "Downloading EvolutionX.zip from Telegram...")
+
     async def test_upload_runs_drive_io_in_worker_thread_and_removes_temp_file(self):
         document = type("Document", (), {
             "file_id": "telegram-file",
@@ -14,11 +55,13 @@ class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
         })()
         replied_message = type("Message", (), {"document": document})()
         sent_messages = []
+
         async def reply_text(*args, **kwargs):
             message = type("StatusMessage", (), {})()
             message.edit_text = AsyncMock()
             sent_messages.append(message)
             return message
+
         message = type("Message", (), {
             "reply_to_message": replied_message,
             "reply_text": reply_text,
@@ -29,14 +72,17 @@ class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
         bot = type("Bot", (), {"get_file": AsyncMock(return_value=tg_file)})()
         context = type("Context", (), {"bot": bot})()
         observed = {}
+
         async def run_in_thread(func, *args):
             observed["func"] = func
             observed["args"] = args
             return "https://drive.google.com/file/d/abc/view"
+
         with patch.object(drive_handler, "DRIVE_ALLOWED_USER_IDS", frozenset({42})), \
              patch.object(drive_handler.asyncio, "to_thread", side_effect=run_in_thread), \
              patch.object(drive_handler, "get_user_info", return_value="test user"):
             await drive_handler.upload(update, context)
+
         bot.get_file.assert_awaited_once_with("telegram-file")
         tg_file.download_to_drive.assert_awaited_once()
         upload_path = observed["args"][0]
@@ -47,8 +93,6 @@ class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
         sent_messages[0].edit_text.assert_awaited()
 
     async def test_upload_supports_video_photo_and_topic_caption_fallback(self):
-        from types import SimpleNamespace
-
         cases = [
             (
                 SimpleNamespace(
@@ -97,8 +141,6 @@ class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(up.call_args[0][2], expected_name)
 
     async def test_upload_supports_external_reply_and_logs_warning_when_media_missing(self):
-        from types import SimpleNamespace
-
         ext_msg = SimpleNamespace(
             reply_to_message=None,
             external_reply=SimpleNamespace(
@@ -133,8 +175,6 @@ class DriveHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("[UPLOAD]" in line and "reply=[story]" in line for line in logs.output))
 
     async def test_upload_sends_fresh_message_and_deletes_stale_status_when_supported(self):
-        from types import SimpleNamespace
-
         status_msg = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
         msg = SimpleNamespace(
             chat_id=-1001,

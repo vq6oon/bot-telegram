@@ -39,12 +39,23 @@ def _whitelist(raw: str, owner_id: int) -> frozenset[int]:
 _load_env()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+TELEGRAM_API_BASE_URL = (
+    os.environ.get("TELEGRAM_API_BASE_URL", "").strip()
+    or "https://api.telegram.org/bot"
+)
+TELEGRAM_FILE_BASE_URL = (
+    os.environ.get("TELEGRAM_FILE_BASE_URL", "").strip()
+    or "https://api.telegram.org/file/bot"
+)
 COOLDOWN_SECONDS = 30
 OWNER_ID = _int_env("OWNER_ID", 0)
 GITHUB_LINK = os.environ.get("GITHUB_LINK", "")
 
-# Telegram limits
-MAX_TELEGRAM_DOWNLOAD_SIZE = 20 * 1024 * 1024  # 20 MB getFile limit
+# Telegram limits; set MAX_TELEGRAM_DOWNLOAD_SIZE=0 only with a local Bot API server.
+MAX_TELEGRAM_DOWNLOAD_SIZE = max(
+    0,
+    _int_env("MAX_TELEGRAM_DOWNLOAD_SIZE", 20 * 1024 * 1024),
+)
 MAX_TELEGRAM_BOT_DOWNLOAD_SIZE = 20 * 1024 * 1024
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024       # 50 MB bot send limit
 

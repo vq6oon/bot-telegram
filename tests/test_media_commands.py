@@ -86,6 +86,8 @@ class MediaCommandTests(unittest.TestCase):
         class Builder:
             def concurrent_updates(self, *_): return self
             def token(self, *_): return self
+            def base_url(self, *_): return self
+            def base_file_url(self, *_): return self
             def request(self, *_): return self
             def build(self): return fake
 

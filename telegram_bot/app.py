@@ -9,7 +9,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.request import HTTPXRequest
-from .config import BOT_TOKEN
+from .config import BOT_TOKEN, TELEGRAM_API_BASE_URL, TELEGRAM_FILE_BASE_URL
 from .handlers import admin, anime, changelog, drive, general, media
 from .logging_setup import configure_logging
 from .services import drive as drive_service
@@ -30,7 +30,15 @@ async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TY
 def build_application():
     configure_logging()
     request = HTTPXRequest(connect_timeout=30, read_timeout=300, write_timeout=300)
-    app = ApplicationBuilder().token(BOT_TOKEN).request(request).concurrent_updates(8).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .base_url(TELEGRAM_API_BASE_URL)
+        .base_file_url(TELEGRAM_FILE_BASE_URL)
+        .request(request)
+        .concurrent_updates(8)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", general.start))
     app.add_handler(CommandHandler("menu", general.menu))

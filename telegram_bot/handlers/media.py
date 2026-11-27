@@ -691,7 +691,12 @@ async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     video = msg.reply_to_message.video
-    if getattr(video, "file_size", None) and video.file_size > MAX_TELEGRAM_DOWNLOAD_SIZE:
+    video_size = getattr(video, "file_size", None)
+    if (
+        MAX_TELEGRAM_DOWNLOAD_SIZE > 0
+        and video_size
+        and video_size > MAX_TELEGRAM_DOWNLOAD_SIZE
+    ):
         return await msg.reply_text("Video exceeds Telegram's 20 MB bot limit.")
 
     user = _safe_user(update)
