@@ -24,7 +24,7 @@ cp .env.example .env
    ```bash
    python get_token.py
    ```
-   `get_token.py` requests the `https://www.googleapis.com/auth/drive.file` scope. To access an existing Drive folder created outside this OAuth client, change `SCOPES` in `get_token.py` to `https://www.googleapis.com/auth/drive` before running it.
+   `get_token.py` defaults to `https://www.googleapis.com/auth/drive.file`. If your bot must manage an existing Drive folder not created or opened by this app, run it with `--full-drive-access`, which grants access to all Drive files; back up the existing `token.json` first because reauthorization replaces it. For OAuth on a VPS, keep the script running and forward its callback port from your computer, for example `ssh -N -L 8765:127.0.0.1:8765 <user>@<host>`, then open the printed authorization URL locally.
 3. Optional for age-restricted or bot-checked YouTube videos: place Netscape-format cookies in `cookies.txt` (or set `YTDLP_COOKIES_FILE`).
 4. Start the bot from the repository root (`bot.py` runs `telegram_bot.app.main()`):
    ```bash
@@ -118,7 +118,7 @@ telegram_bot/
   handlers/                          general, admin, changelog, drive, media
   menus/                             welcome.py, commands.py, contributors.py
   services/                          drive.py, job_tracker.py, media.py, subtitles.py, tiktok.py, anime.py
-tests/                               Unit test suite (64 tests, offline)
+tests/                               Unit test suite (70 tests, offline)
 ```
 
 Runtime temp directories (`youtube-dump/`, `ig-dump/`, `subs/`, `converted/`) and sensitive files (`.env`, `cookies.txt`, `credentials.json`, `token.json`, `bot-activity.log`) are excluded from version control.
